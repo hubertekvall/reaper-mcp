@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 from lupa import lua54
 
 from reaper_mcp.paths import bundled_bridge_script
@@ -22,6 +23,22 @@ from reaper_mcp.paths import bundled_bridge_script
 _guid = itertools.count(1)
 PPQ = 960
 SEC_PER_QN = 0.5
+
+
+def write_wav(path, samples, rate: int, bits: int = 24) -> None:
+    """Write float samples (n, channels) as a PCM WAV file."""
+    samples = np.asarray(samples, dtype=np.float64)
+    if samples.ndim == 1:
+        samples = samples[:, None]
+    n, ch = samples.shape
+    width = bits // 8
+    ints = np.round(np.clip(samples, -1, 1 - 2 ** -(bits - 1)) * 2 ** (bits - 1)).astype("<i4")
+    raw = ints.astype("<i2").tobytes() if bits == 16 else ints.view(np.uint8).reshape(-1, 4)[:, :width].tobytes()
+    header = b"RIFF" + (36 + len(raw)).to_bytes(4, "little") + b"WAVEfmt " + (16).to_bytes(4, "little")
+    header += (1).to_bytes(2, "little") + ch.to_bytes(2, "little") + rate.to_bytes(4, "little")
+    header += (rate * ch * width).to_bytes(4, "little") + (ch * width).to_bytes(2, "little") + bits.to_bytes(2, "little")
+    with open(path, "wb") as f:
+        f.write(header + b"data" + len(raw).to_bytes(4, "little") + raw)
 
 
 def new_guid() -> str:
@@ -49,7 +66,8 @@ def fake_plugin(name: str) -> FX:
         return FX(name, params=[
             ["Threshold", 1.0, lambda v: f"{-60 + 60 * v:.1f} dB"],
             ["Ratio", 0.1, lambda v: f"{1 + 19 * v:.1f}:1"],
-            # Real ReaComp: detector input as a channel index, displayed as a plain number 0..1084.
+            # Real ReaComp: SignIn is the detector input (0 = main, 2 = aux), shown as a number 0..1084.
+            ["SignIn", 0.0, lambda v: f"{round(v * 1084)}"],
             ["AudIn", 0.0, lambda v: f"{round(v * 1084)}"],
         ])
     if "ReaVerbate" in name:
@@ -182,6 +200,8 @@ class FakeReaper:
         self.time_sel = (0.0, 0.0)
         self.commands: list[int] = []
         self.sends: list[Send] = []
+        self.project_info: dict = {}
+        self.renders: list[dict] = []
 
     # helpers
     def all_items(self) -> list[Item]:
@@ -238,6 +258,8 @@ class FakeReaper:
                 glued = Item(start, end - start, [Take("glued")], selected=True)
                 glued.track = tr
                 tr.items.append(glued)
+        elif cmd == 42230:
+            self._render()
         elif cmd == 1013:
             self.play_state = 5
 
@@ -317,9 +339,15 @@ class FakeReaper:
     def GetEnvelopeStateChunk(self, env, _buf, _undo):
         return (True, f"<ENV\nACT {int(env.active)} -1\nVIS {int(env.visible)} 1 1\n>\n")
     def SetEnvelopeStateChunk(self, env, chunk, _undo):
-        env.active = "\nACT 1" in chunk
+        # Like REAPER 7.84: ACT only sticks once the envelope has points.
+        if env.points or env.items:
+            env.active = "\nACT 1" in chunk
         env.visible = "\nVIS 1" in chunk
         return True
+    def GetSetEnvelopeInfo_String(self, env, key, value, is_set):
+        if key == "ACTIVE" and is_set and (env.points or env.items):
+            env.active = value == "1"
+        return (True, "1" if env.active else "0") if key == "ACTIVE" else (False, "")
     def TrackList_AdjustWindows(self, _minor): pass
     def GetFXEnvelope(self, tr, fx, param, create):
         key = (tr.fx[fx], param)
@@ -540,7 +568,33 @@ class FakeReaper:
         return self.time_sel
     def GetProjectLength(self, _proj):
         return max((i.pos + i.len for i in self.all_items()), default=0.0)
-    def GetSetProjectInfo(self, _proj, key, _v, _set): return 48000.0 if key == "PROJECT_SRATE" else 0.0
+    def GetSetProjectInfo(self, _proj, key, v, is_set):
+        if is_set:
+            self.project_info[key] = float(v)
+        return self.project_info.get(key, 48000.0 if key == "PROJECT_SRATE" else 0.0)
+    def GetSetProjectInfo_String(self, _proj, key, v, is_set):
+        if is_set:
+            self.project_info[key] = v
+        return (True, self.project_info.get(key, ""))
+    def IsTrackSelected(self, tr): return tr.selected
+    def SetTrackSelected(self, tr, sel): tr.selected = bool(sel)
+
+    def _render(self) -> None:
+        """Command 42230: write a 1 kHz sine at -20 dBFS for each target, like REAPER would."""
+        info = self.project_info
+        settings = int(info.get("RENDER_SETTINGS", 0))
+        start, end = info.get("RENDER_STARTPOS", 0.0), info.get("RENDER_ENDPOS", 0.0)
+        pattern = info.get("RENDER_PATTERN", "untitled")
+        names = [pattern.replace("$track", t.name) for t in self.tracks if t.selected] if settings in (2, 128) else [pattern]
+        rate, n = 48000, int(round((end - start) * 48000))
+        tone = 10 ** (-20 / 20) * np.sin(2 * np.pi * 1000 * np.arange(n) / rate)
+        targets = []
+        for name in names:
+            path = os.path.join(info.get("RENDER_FILE", ""), name + ".wav")
+            write_wav(path, np.column_stack([tone, tone]), rate)
+            targets.append(path)
+        self.renders.append({k: v for k, v in info.items() if k.startswith("RENDER_")})
+        info["RENDER_TARGETS"] = ";".join(targets)
 
     # --- markers and regions ---
     def CountProjectMarkers(self, _proj):

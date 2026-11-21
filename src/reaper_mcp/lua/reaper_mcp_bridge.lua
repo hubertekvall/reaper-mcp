@@ -8,7 +8,7 @@
 -- Load once via Actions > Show action list > New action > Load ReaScript,
 -- then run it. It keeps running in the background until stopped.
 
-local BRIDGE_VERSION = "0.2.1"
+local BRIDGE_VERSION = "0.3.0"
 local HEARTBEAT_INTERVAL = 1.0 -- seconds
 
 local M = { version = BRIDGE_VERSION }
@@ -1586,14 +1586,15 @@ end
 -- Look for the plug-in parameter that selects the sidechain/detector input and point it at the aux input.
 local function route_detector(tr, fx)
   local _, fxname = reaper.TrackFX_GetFXName(tr, fx, "")
-  if fxname:find("ReaComp") or fxname:find("ReaGate") or fxname:find("ReaXcomp") then
-    -- Cockos plug-ins: "AudIn" is the detector's input channel pair (0 = main 1/2, 2 = aux 3/4).
+  if fxname:find("ReaComp") then
+    -- Cockos plug-ins: "SignIn" selects the detector input (0 = main inputs, 2 = auxiliary inputs 3/4).
+    -- Confirmed in ReaComp on REAPER 7.84; "AudIn" is a different setting.
     for i = 0, reaper.TrackFX_GetNumParams(tr, fx) - 1 do
       local _, name = reaper.TrackFX_GetParamName(tr, fx, i, "")
-      if name == "AudIn" then
+      if name == "SignIn" then
         reaper.TrackFX_SetParamNormalized(tr, fx, i, solve_display(tr, fx, i, 2))
         local _, shown = reaper.TrackFX_GetFormattedParamValue(tr, fx, i, "")
-        return "AudIn = " .. shown .. " (auxiliary input 3/4)"
+        return "SignIn = " .. shown .. " (detector: auxiliary inputs 3/4)"
       end
     end
   end
@@ -1662,7 +1663,9 @@ end
 
 -- REAPER rebuilds envelopes inserted through the track chunk as inactive and hidden,
 -- so switch them on through the envelope's own state chunk.
+-- REAPER ignores ACT on an envelope without points, so this runs again after points are written.
 local function activate_envelope(env)
+  if reaper.GetSetEnvelopeInfo_String then reaper.GetSetEnvelopeInfo_String(env, "ACTIVE", "1", true) end
   local ok, st = reaper.GetEnvelopeStateChunk(env, "", false)
   if not ok then return end
   local new = st:gsub("\nACT 0", "\nACT 1"):gsub("\nVIS 0", "\nVIS 1")
@@ -1756,6 +1759,7 @@ local function write_points(env, info, points, p)
       point_shape(pt.shape), pt.tension or 0, false, true)
   end
   reaper.Envelope_SortPointsEx(env, ai)
+  activate_envelope(env)
   local _, ename = reaper.GetEnvelopeName(env, "")
   return json.object({
     envelope = ename, points_written = #points, start = lo, ["end"] = hi,
@@ -1861,6 +1865,73 @@ function commands.clear_automation(p)
   end)
 end
 
+---------------------------------------------------------------------------
+-- Rendering
+---------------------------------------------------------------------------
+
+local CMD_RENDER_RECENT = 42230 -- File: Render project, using the most recent render settings, auto-close dialog
+local WAV_24BIT = "ZXZhdxgAAQ==" -- RENDER_FORMAT for 24-bit PCM WAV
+local RENDER_NUM_KEYS = { "RENDER_BOUNDSFLAG", "RENDER_STARTPOS", "RENDER_ENDPOS", "RENDER_SETTINGS",
+  "RENDER_CHANNELS", "RENDER_ADDTOPROJ" }
+local RENDER_STR_KEYS = { "RENDER_FILE", "RENDER_PATTERN", "RENDER_FORMAT" }
+
+-- Render a time range of the master mix, or of chosen tracks, to WAV files. The project's own
+-- render settings and track selection are restored afterwards.
+function commands.render(p)
+  local s = to_time(p.start) or 0
+  local e = to_time(p["end"]) or reaper.GetProjectLength(0)
+  if e <= s then error("nothing to render: end must be after start (is the project empty?)", 0) end
+  local tracks = {}
+  for i = 1, (p.tracks and (p.tracks.n or #p.tracks) or 0) do tracks[i] = get_track(p.tracks[i]) end
+  local dir = is_null(p.directory) and (M.base .. package.config:sub(1, 1) .. "renders") or p.directory
+  reaper.RecursiveCreateDirectory(dir, 0)
+  local name = (is_null(p.name) and ("render-" .. os.date("%Y%m%d-%H%M%S")) or p.name):gsub("[\\/:*?\"<>|]", "_")
+
+  local saved_num, saved_str, saved_sel = {}, {}, {}
+  for _, k in ipairs(RENDER_NUM_KEYS) do saved_num[k] = reaper.GetSetProjectInfo(0, k, 0, false) end
+  for _, k in ipairs(RENDER_STR_KEYS) do
+    local _, v = reaper.GetSetProjectInfo_String(0, k, "", false); saved_str[k] = v
+  end
+  for i = 0, reaper.CountTracks(0) - 1 do
+    local tr = reaper.GetTrack(0, i)
+    saved_sel[#saved_sel + 1] = { tr, reaper.IsTrackSelected(tr) }
+  end
+
+  local ok, result = pcall(function()
+    reaper.GetSetProjectInfo_String(0, "RENDER_FILE", dir, true)
+    reaper.GetSetProjectInfo_String(0, "RENDER_PATTERN", #tracks > 0 and (name .. "-$track") or name, true)
+    reaper.GetSetProjectInfo_String(0, "RENDER_FORMAT", WAV_24BIT, true)
+    reaper.GetSetProjectInfo(0, "RENDER_BOUNDSFLAG", 0, true) -- custom time range
+    reaper.GetSetProjectInfo(0, "RENDER_STARTPOS", s, true)
+    reaper.GetSetProjectInfo(0, "RENDER_ENDPOS", e, true)
+    reaper.GetSetProjectInfo(0, "RENDER_CHANNELS", 2, true)
+    reaper.GetSetProjectInfo(0, "RENDER_ADDTOPROJ", 0, true)
+    local settings = 0 -- master mix
+    if #tracks > 0 then
+      for _, entry in ipairs(saved_sel) do reaper.SetTrackSelected(entry[1], false) end
+      for _, tr in ipairs(tracks) do reaper.SetTrackSelected(tr, true) end
+      settings = p.through_master and 128 or 2 -- selected tracks via master / stems only
+    end
+    reaper.GetSetProjectInfo(0, "RENDER_SETTINGS", settings, true)
+    reaper.Main_OnCommand(CMD_RENDER_RECENT, 0)
+    local _, targets = reaper.GetSetProjectInfo_String(0, "RENDER_TARGETS", "", false)
+    return targets
+  end)
+
+  for _, k in ipairs(RENDER_NUM_KEYS) do reaper.GetSetProjectInfo(0, k, saved_num[k], true) end
+  for _, k in ipairs(RENDER_STR_KEYS) do reaper.GetSetProjectInfo_String(0, k, saved_str[k], true) end
+  for _, entry in ipairs(saved_sel) do reaper.SetTrackSelected(entry[1], entry[2]) end
+  if not ok then error(result, 0) end
+
+  local files = json.array()
+  for f in (result or ""):gmatch("[^;]+") do
+    local fh = io.open(f, "rb")
+    if fh then fh:close(); files[#files + 1] = f end
+  end
+  if #files == 0 then error("REAPER did not write any file (render cancelled or failed?)", 0) end
+  return json.object({ files = files, start = s, ["end"] = e })
+end
+
 M.commands = commands
 
 ---------------------------------------------------------------------------
@@ -1938,8 +2009,13 @@ function M.poll()
   table.sort(names)
   for _, fname in ipairs(names) do
     local path = M.requests .. sep .. fname
-    local raw = read_file(path)
-    os.remove(path)
+    -- Claim the request by renaming it: if two copies of the bridge run, only one wins.
+    local claimed = path .. ".claimed"
+    local raw = nil
+    if os.rename(path, claimed) then
+      raw = read_file(claimed)
+      os.remove(claimed)
+    end
     if raw then
       local id = fname:gsub("%.req%.json$", "")
       write_atomic(M.responses .. sep .. id .. ".res.json", M.handle(raw))

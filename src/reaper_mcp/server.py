@@ -9,11 +9,10 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 from mcp.types import ToolAnnotations
 
-from . import __version__
-
-BRIDGE_VERSION = "0.2.1"  # must match BRIDGE_VERSION in lua/reaper_mcp_bridge.lua
-from . import tools_editing, tools_routing
+from . import __version__, tools_editing, tools_render, tools_routing
 from .bridge import Bridge, BridgeError
+
+BRIDGE_VERSION = "0.3.0"  # must match BRIDGE_VERSION in lua/reaper_mcp_bridge.lua
 
 INSTRUCTIONS = """\
 Controls the REAPER DAW that is running on the user's computer.
@@ -92,6 +91,7 @@ def create_server(bridge: Bridge | None = None) -> MCPServer:
 
     tools_editing.register(mcp, request)
     tools_routing.register(mcp, request)
+    tools_render.register(mcp, bridge)
 
     @mcp.resource("reaper://project", mime_type="application/json")
     async def project_resource() -> str:

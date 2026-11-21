@@ -4,8 +4,8 @@ An [MCP](https://modelcontextprotocol.io) server that lets Claude (or any MCP cl
 [REAPER](https://www.reaper.fm) DAW: read the project, edit items and MIDI, set up tracks, routing,
 FX and automation.
 
-> **Status: step 3 of 4.** Project reading, editing, routing and automation. Render and analysis
-> tools come next.
+> **Status: all 4 steps done.** Project reading, editing, routing, automation, rendering and audio
+> analysis, with a one-command install that starts the bridge with REAPER.
 
 ## How it works
 
@@ -22,16 +22,17 @@ REAPER extensions, works the same on Windows, macOS and Linux.
 
 Requires REAPER 7 and Python 3.11+ (or [uv](https://docs.astral.sh/uv/)).
 
-1. Install the bridge script into REAPER:
+1. Install the bridge script into REAPER and have it start with REAPER:
    ```
-   uvx --from git+https://github.com/hubertekvall/reaper-mcp reaper-mcp install-bridge
+   uvx --from git+https://github.com/hubertekvall/reaper-mcp reaper-mcp install-bridge --autostart
    ```
-   This copies `reaper_mcp_bridge.lua` to `%APPDATA%\REAPER\Scripts\reaper_mcp\`. For a portable
-   REAPER install, add `--resource-path <folder>` (REAPER shows it under *Options > Show REAPER
-   resource path*).
-2. In REAPER: *Actions > Show action list > New action > Load ReaScript*, pick that file, and run it.
-   The console prints `reaper-mcp bridge 0.1.0 running`.
-   After updating reaper-mcp, run `install-bridge` again and restart the script in REAPER;
+   This copies `reaper_mcp_bridge.lua` to `%APPDATA%\REAPER\Scripts\reaper_mcp\` and adds a small,
+   clearly marked block to `Scripts\__startup.lua` that runs it whenever REAPER starts (your own
+   startup code is kept; `--no-autostart` removes the block again). For a portable REAPER install,
+   add `--resource-path <folder>` (REAPER shows it under *Options > Show REAPER resource path*).
+2. Restart REAPER. The console prints `reaper-mcp bridge 0.3.0 running`. Without `--autostart`,
+   load and run the script yourself: *Actions > Show action list > New action > Load ReaScript*.
+   After updating reaper-mcp, run `install-bridge` again and restart REAPER (or the script);
    `reaper_status` warns when REAPER is still running an older bridge.
 3. Check the connection:
    ```
@@ -67,6 +68,7 @@ GUID or `{"track": <track>, "index": <n>}`. A **time** is seconds, `{"beats": <q
 | Markers | `add_marker` (markers and regions), `update_marker`, `delete_marker` |
 | Routing | `create_send`, `update_send` (level, pan, mute, pre/post, channels, MIDI, remove), `create_fx_return` (reverb/delay/parallel bus fed by sends), `create_sidechain` (into channels 3/4, sets the detector input where possible). Folder buses: `create_folder`. |
 | Automation | `write_automation` (points with curve shapes, optionally as an automation item), `draw_automation` (ramps and sine/triangle/square/saw LFOs synced to beats), `get_automation`, `clear_automation`. Targets: volume, pan, width, mute, trim, or any FX parameter. Track automation mode via `update_track`. |
+| Render and listen | `render` (master mix or one file per track, any time range, 24-bit WAV; your own render settings and track selection are restored) with a built-in analysis, and `analyze_audio_file` for any WAV such as a reference track. The analysis reports integrated, short-term and momentary loudness (EBU R128 / BS.1770), loudness range, sample and true peak, RMS, crest factor, clipping, DC offset, stereo correlation, width and balance, and energy per band from sub to air. |
 | Anything else | `call_reaper_api`: any [ReaScript function](https://www.reaper.fm/sdk/reascript/reascripthelp.html), with optional undo |
 
 REAPER objects travel as references such as `{"$type": "MediaTrack", "index": 0}`,
