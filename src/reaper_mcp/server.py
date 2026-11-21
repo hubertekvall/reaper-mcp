@@ -10,14 +10,20 @@ from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 from mcp.types import ToolAnnotations
 
 from . import __version__
+from . import tools_editing
 from .bridge import Bridge, BridgeError
 
 INSTRUCTIONS = """\
 Controls the REAPER DAW that is running on the user's computer.
 
 Start with get_project_state to see tracks, items, FX, markers and regions.
-Track indices are 0-based; the master track is reported separately.
-Times are in seconds unless a tool says otherwise.
+
+Conventions shared by the tools:
+- track: 0-based index, exact name, GUID, or "master".
+- item: the item's GUID from get_project_state, or {"track": <track>, "index": <0-based item on it>}.
+- time: seconds, {"beats": <quarter notes from project start>}, or {"bar": 5, "beat": 1} (1-based).
+Every editing tool is one undo step in REAPER. Read the project again after structural changes,
+because track and item indices shift.
 
 call_reaper_api runs any ReaScript function (https://www.reaper.fm/sdk/reascript/reascripthelp.html,
 Lua signatures). REAPER objects are passed and returned as references, for example
@@ -75,6 +81,8 @@ def create_server(bridge: Bridge | None = None) -> MCPServer:
         if undo_label:
             params["undo"] = undo_label
         return await request("call", params)
+
+    tools_editing.register(mcp, request)
 
     @mcp.resource("reaper://project", mime_type="application/json")
     async def project_resource() -> str:

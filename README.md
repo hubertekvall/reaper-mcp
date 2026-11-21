@@ -4,8 +4,8 @@ An [MCP](https://modelcontextprotocol.io) server that lets Claude (or any MCP cl
 [REAPER](https://www.reaper.fm) DAW: read the project, edit items and MIDI, set up tracks, routing,
 FX and automation.
 
-> **Status: step 1 of 4.** The bridge, project reading and a generic ReaScript call work. Dedicated
-> editing, routing, automation and render tools come next.
+> **Status: step 2 of 4.** Project reading, editing (tracks, items, MIDI, FX, transport, tempo,
+> markers) and a generic ReaScript call. Routing, automation and render/analysis tools come next.
 
 ## How it works
 
@@ -50,11 +50,20 @@ Requires REAPER 7 and Python 3.11+ (or [uv](https://docs.astral.sh/uv/)).
 
 ## Tools
 
-| Tool | What it does |
+Shared conventions: a **track** is a 0-based index, exact name, GUID or `"master"`. An **item** is its
+GUID or `{"track": <track>, "index": <n>}`. A **time** is seconds, `{"beats": <quarter notes>}` or
+`{"bar": 5, "beat": 1}`. Every editing tool is one undo step in REAPER.
+
+| Area | Tools |
 | --- | --- |
-| `reaper_status` | Checks that REAPER and the bridge are reachable. |
-| `get_project_state` | Tempo, time signature, transport, every track with FX, items, routing counts, markers and regions. Also available as the `reaper://project` resource. |
-| `call_reaper_api` | Calls any [ReaScript function](https://www.reaper.fm/sdk/reascript/reascripthelp.html). With `undo_label`, the change becomes one undo step. |
+| Project | `reaper_status`, `get_project_state` (also the `reaper://project` resource) |
+| Tracks | `create_track`, `update_track` (name, volume, pan, mute, solo, phase, color, folder depth, move), `delete_tracks`, `create_folder`, `setup_recording` (input, monitoring, record mode, arm), `create_instrument_track` |
+| Items | `edit_item` (move, trim, change track, fades, volume, pitch, rate, lock, name), `split_item`, `delete_items`, `reverse_items`, `glue_items`, `duplicate_item`, `insert_media_file` |
+| MIDI | `create_midi_item`, `get_midi`, `add_midi_notes`, `delete_midi_notes`, `add_midi_cc` (CC, pitch bend, program change) |
+| FX | `list_installed_fx`, `add_fx`, `remove_fx`, `update_fx` (bypass, offline, preset, reorder), `get_fx_params`, `set_fx_params` (normalized, or by the value the plug-in displays, such as `-6` dB) |
+| Transport | `transport` (play, stop, pause, record, go to), `set_time_selection`, `set_tempo` |
+| Markers | `add_marker` (markers and regions), `update_marker`, `delete_marker` |
+| Anything else | `call_reaper_api`: any [ReaScript function](https://www.reaper.fm/sdk/reascript/reascripthelp.html), with optional undo |
 
 REAPER objects travel as references such as `{"$type": "MediaTrack", "index": 0}`,
 `{"$type": "MediaItem", "guid": "{...}"}` or `{"$type": "MediaTrack", "master": true}`.
