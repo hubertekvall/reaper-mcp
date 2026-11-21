@@ -8,7 +8,7 @@
 -- Load once via Actions > Show action list > New action > Load ReaScript,
 -- then run it. It keeps running in the background until stopped.
 
-local BRIDGE_VERSION = "0.2.0"
+local BRIDGE_VERSION = "0.2.1"
 local HEARTBEAT_INTERVAL = 1.0 -- seconds
 
 local M = { version = BRIDGE_VERSION }
@@ -1528,10 +1528,29 @@ function commands.remove_send(p)
   return run(p, "Remove send", function() return reaper.RemoveTrackSend(src, 0, idx) end)
 end
 
-local function set_wet(tr, fx, amount)
-  if not reaper.TrackFX_GetParamFromIdent then return end
-  local wet = reaper.TrackFX_GetParamFromIdent(tr, fx, ":wet")
-  if wet and wet >= 0 then reaper.TrackFX_SetParamNormalized(tr, fx, wet, amount) end
+-- Make a return-track effect 100% wet: REAPER's own wet/dry mix at 100%, and the plug-in's
+-- own dry level at minimum (e.g. ReaVerbate's Dry) or its mix control at 100%.
+local function set_full_wet(tr, fx)
+  local builtin_wet = -1
+  if reaper.TrackFX_GetParamFromIdent then
+    builtin_wet = reaper.TrackFX_GetParamFromIdent(tr, fx, ":wet") or -1
+    if builtin_wet >= 0 then reaper.TrackFX_SetParamNormalized(tr, fx, builtin_wet, 1.0) end
+  end
+  local changed = json.array()
+  for i = 0, reaper.TrackFX_GetNumParams(tr, fx) - 1 do
+    if i ~= builtin_wet then
+      local _, name = reaper.TrackFX_GetParamName(tr, fx, i, "")
+      local n = name:lower():gsub("^%s+", ""):gsub("%s+$", "")
+      if n == "dry" or n == "dry level" or n == "dry gain" or n == "dry mix" then
+        reaper.TrackFX_SetParamNormalized(tr, fx, i, 0.0)
+        changed[#changed + 1] = name
+      elseif n == "mix" or n == "dry/wet" or n == "wet/dry" then
+        reaper.TrackFX_SetParamNormalized(tr, fx, i, 1.0)
+        changed[#changed + 1] = name
+      end
+    end
+  end
+  return changed
 end
 
 -- A return track with FX (reverb, delay, parallel compression...) fed by sends.
@@ -1550,9 +1569,9 @@ function commands.create_fx_return(p)
         reaper.DeleteTrack(ret)
         error("FX not found: " .. p.fx[i] .. ". Use list_installed_fx to find the exact name.", 0)
       end
-      if p.full_wet ~= false then set_wet(ret, fx, 1.0) end
+      local adjusted = p.full_wet ~= false and set_full_wet(ret, fx) or json.array()
       local _, name = reaper.TrackFX_GetFXName(ret, fx, "")
-      fx_out[#fx_out + 1] = name
+      fx_out[#fx_out + 1] = json.object({ index = fx, name = name, set_to_wet = adjusted })
     end
     local sends = json.array()
     for _, src in ipairs(sources) do
@@ -1566,6 +1585,18 @@ end
 
 -- Look for the plug-in parameter that selects the sidechain/detector input and point it at the aux input.
 local function route_detector(tr, fx)
+  local _, fxname = reaper.TrackFX_GetFXName(tr, fx, "")
+  if fxname:find("ReaComp") or fxname:find("ReaGate") or fxname:find("ReaXcomp") then
+    -- Cockos plug-ins: "AudIn" is the detector's input channel pair (0 = main 1/2, 2 = aux 3/4).
+    for i = 0, reaper.TrackFX_GetNumParams(tr, fx) - 1 do
+      local _, name = reaper.TrackFX_GetParamName(tr, fx, i, "")
+      if name == "AudIn" then
+        reaper.TrackFX_SetParamNormalized(tr, fx, i, solve_display(tr, fx, i, 2))
+        local _, shown = reaper.TrackFX_GetFormattedParamValue(tr, fx, i, "")
+        return "AudIn = " .. shown .. " (auxiliary input 3/4)"
+      end
+    end
+  end
   for i = 0, reaper.TrackFX_GetNumParams(tr, fx) - 1 do
     local _, name = reaper.TrackFX_GetParamName(tr, fx, i, "")
     local lname = name:lower()
@@ -1629,6 +1660,18 @@ local function create_track_envelope(tr, chunk)
   reaper.SetTrackStateChunk(tr, st, false)
 end
 
+-- REAPER rebuilds envelopes inserted through the track chunk as inactive and hidden,
+-- so switch them on through the envelope's own state chunk.
+local function activate_envelope(env)
+  local ok, st = reaper.GetEnvelopeStateChunk(env, "", false)
+  if not ok then return end
+  local new = st:gsub("\nACT 0", "\nACT 1"):gsub("\nVIS 0", "\nVIS 1")
+  if new ~= st then
+    reaper.SetEnvelopeStateChunk(env, new, false)
+    if reaper.TrackList_AdjustWindows then reaper.TrackList_AdjustWindows(false) end
+  end
+end
+
 -- Resolve the envelope for p.track + p.target ("volume", "pan", ..., or {"fx": .., "param": ..}).
 local function get_env(p, create)
   local tr = get_track(p.track)
@@ -1644,6 +1687,7 @@ local function get_env(p, create)
       if not env then error("could not create the " .. kind .. " envelope", 0) end
     end
     if not env then error("this track has no " .. kind .. " automation", 0) end
+    if create then activate_envelope(env) end
     return env, { kind = kind, track = tr }
   end
   if type(target) ~= "table" or is_null(target.fx) or is_null(target.param) then
@@ -1667,7 +1711,7 @@ local function to_env_value(env, info, v)
     return reaper.ScaleToEnvelopeMode(reaper.GetEnvelopeScalingMode(env), gain)
   elseif k == "pan" then return PAN_ENV_SIGN * v
   elseif k == "width" then return v
-  elseif k == "mute" then return (v == true or v == 1) and 1 or 0
+  elseif k == "mute" then return (v == true or v == 1) and 0 or 1 -- REAPER: 1 = unmuted, 0 = muted
   end
   local norm = v
   if type(v) == "table" and not is_null(v.display_value) then
@@ -1681,7 +1725,7 @@ local function from_env_value(env, info, v)
   if k == "volume" or k == "trim" then
     return db(reaper.ScaleFromEnvelopeMode(reaper.GetEnvelopeScalingMode(env), v))
   elseif k == "pan" then return PAN_ENV_SIGN * v
-  elseif k == "mute" then return v >= 0.5
+  elseif k == "mute" then return v < 0.5
   elseif k == "width" then return v end
   if info.max == info.min then return v end
   return (v - info.min) / (info.max - info.min)

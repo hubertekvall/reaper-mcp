@@ -89,8 +89,9 @@ def register(mcp: MCPServer, request: Request) -> None:
         color: str | None = None,
     ) -> dict[str, Any]:
         """Create an effect return track, e.g. "Reverb" with ["ReaVerbate"] or "Parallel Comp" with
-        ["ReaComp"], and send each source track to it at send_db. Return-track plug-ins are set to
-        100% wet unless full_wet=false. This is the standard way to share one reverb or delay across
+        ["ReaComp"], and send each source track to it at send_db. Unless full_wet=false, each plug-in is
+        made 100% wet: REAPER's wet/dry mix at 100%, and the plug-in's own Dry control at minimum (or its
+        Mix at 100%). This is the standard way to share one reverb or delay across
         many tracks, or to blend in heavy compression in parallel."""
         return await request(
             "create_fx_return",
@@ -107,7 +108,9 @@ def register(mcp: MCPServer, request: Request) -> None:
     ) -> dict[str, Any]:
         """Sidechain: send from_track (e.g. the kick) into channels 3/4 of to_track (e.g. the bass), so a
         compressor or gate there can react to it. If fx names that plug-in, its detector/sidechain input
-        parameter is switched to the auxiliary input when it has one (ReaComp does)."""
+        parameter is switched to the auxiliary input where that can be done automatically (ReaComp, ReaGate,
+        ReaXcomp, and plug-ins with a detector/sidechain selector). Otherwise the result says to enable the
+        plug-in's sidechain input in its own window."""
         return await request(
             "create_sidechain",
             _clean(**{"from": from_track, "to": to_track}, fx=fx, send_db=send_db, mode=mode),

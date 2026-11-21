@@ -49,7 +49,14 @@ def fake_plugin(name: str) -> FX:
         return FX(name, params=[
             ["Threshold", 1.0, lambda v: f"{-60 + 60 * v:.1f} dB"],
             ["Ratio", 0.1, lambda v: f"{1 + 19 * v:.1f}:1"],
-            ["Detector input", 0.0, lambda v: "Main L+R" if v < 0.5 else "Aux L+R"],
+            # Real ReaComp: detector input as a channel index, displayed as a plain number 0..1084.
+            ["AudIn", 0.0, lambda v: f"{round(v * 1084)}"],
+        ])
+    if "ReaVerbate" in name:
+        return FX(name, params=[
+            ["Wet", 0.5, lambda v: f"{-60 + 66 * v:.1f} dB"],
+            ["Dry", 0.9, lambda v: "-inf dB" if v == 0 else f"{-60 + 66 * v:.1f} dB"],
+            ["Room size", 0.5, lambda v: f"{v * 100:.0f}"],
         ])
     if "ReaEQ" in name:
         return FX(name, params=[
@@ -65,6 +72,8 @@ class Envelope(Obj):
     name: str
     points: list = field(default_factory=list)  # [time, value, shape, tension, selected]
     items: list = field(default_factory=list)  # [position, length, points]
+    active: bool = True
+    visible: bool = True
 
     def pts(self, ai):
         return self.points if ai < 0 else self.items[ai][2]
@@ -302,8 +311,16 @@ class FakeReaper:
     def SetTrackStateChunk(self, tr, chunk, _undo):
         assert chunk.index("<FXCHAIN") > max(chunk.rfind("ENV"), 0), "envelopes must come before the FX chain"
         for name in re.findall(r"^<(\w*ENV\d?)$", chunk, re.M):
-            tr.envs.setdefault(name, Envelope(ENV_DISPLAY.get(name, name)))
+            # Like REAPER 7.84: envelopes added through the track chunk come back inactive and hidden.
+            tr.envs.setdefault(name, Envelope(ENV_DISPLAY.get(name, name), active=False, visible=False))
         return True
+    def GetEnvelopeStateChunk(self, env, _buf, _undo):
+        return (True, f"<ENV\nACT {int(env.active)} -1\nVIS {int(env.visible)} 1 1\n>\n")
+    def SetEnvelopeStateChunk(self, env, chunk, _undo):
+        env.active = "\nACT 1" in chunk
+        env.visible = "\nVIS 1" in chunk
+        return True
+    def TrackList_AdjustWindows(self, _minor): pass
     def GetFXEnvelope(self, tr, fx, param, create):
         key = (tr.fx[fx], param)
         if key not in tr.fx_envs and create:

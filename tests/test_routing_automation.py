@@ -87,6 +87,9 @@ async def test_fx_return(call):
     ret = call.fake.tracks[out["index"]]
     assert ret.name == "Reverb" and ret.fx[0].name == "VST: ReaVerbate (Cockos)"
     assert ret.fx[0].wet == 1.0
+    assert ret.fx[0].params[1][1] == 0.0  # ReaVerbate's own Dry at -inf
+    assert ret.fx[0].params[0][1] == 0.5  # Wet untouched
+    assert out["fx"][0]["set_to_wet"] == ["Dry"]
     assert [s["to"]["name"] for s in out["sends"]] == ["Reverb", "Reverb"]
     assert all(s["volume_db"] == pytest.approx(-15) and s["mode"] == "post_fader" for s in out["sends"])
     assert call.fake.undo[-1] == "Create FX return"
@@ -102,7 +105,7 @@ async def test_sidechain_sets_detector_input(call):
     out = await call("create_sidechain", from_track="Kick", to_track="Bass", fx="ReaComp")
     assert out["send"]["dest_channels"] == "3/4" and out["send"]["mode"] == "post_fx"
     assert out["target_channels"] == 4
-    assert out["detector"] == "Detector input = Aux L+R"
+    assert out["detector"] == "AudIn = 2 (auxiliary input 3/4)"
     assert call.fake.sends[0].info["I_MIDIFLAGS"] == 31
 
     plain = await call("create_sidechain", from_track="Kick", to_track="Keys", fx="ReaSynth")
@@ -119,6 +122,7 @@ async def test_write_and_read_volume_automation(call):
     ])
     assert out["envelope"] == "Volume" and out["points_written"] == 3
     env = track(call, "Kick").envs["VOLENV2"]
+    assert env.active and env.visible  # switched on after REAPER creates it hidden
     # stored with REAPER's fader scaling (the fake uses a square-root curve)
     assert env.points[1][1] == pytest.approx(1.0) and env.points[2][1] == pytest.approx(0.5011872 ** 0.5)
 
@@ -142,6 +146,7 @@ async def test_pan_mute_and_fx_parameter_automation(call):
     assert [p["value"] for p in read["points"]] == [-1, 1]
 
     await call("write_automation", track="Keys", target="mute", points=[{"time": 0, "value": True, "shape": "square"}])
+    assert track(call, "Keys").envs["MUTEENV"].points[0][1] == 0  # REAPER: 0 = muted, 1 = unmuted
     assert (await call("get_automation", track="Keys", target="mute"))["points"][0]["value"] is True
 
     await call("write_automation", track="Drums", target={"fx": "ReaEQ", "param": "Gain"}, points=[
