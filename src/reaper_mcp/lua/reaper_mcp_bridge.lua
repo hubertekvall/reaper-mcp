@@ -32,7 +32,8 @@ local escapes = {
 }
 
 local function encode_string(s)
-  return '"' .. s:gsub('[%c"\\]', function(c)
+  -- Explicit byte ranges: %c depends on the C locale and can match UTF-8 bytes (macOS).
+  return '"' .. s:gsub('[\0-\31\127"\\]', function(c)
     return escapes[c] or string.format("\\u%04x", c:byte())
   end) .. '"'
 end
