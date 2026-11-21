@@ -12,7 +12,7 @@ from mcp.types import ToolAnnotations
 from . import __version__, tools_editing, tools_render, tools_routing
 from .bridge import Bridge, BridgeError
 
-BRIDGE_VERSION = "0.3.0"  # must match BRIDGE_VERSION in lua/reaper_mcp_bridge.lua
+BRIDGE_VERSION = "0.3.1"  # must match BRIDGE_VERSION in lua/reaper_mcp_bridge.lua
 
 INSTRUCTIONS = """\
 Controls the REAPER DAW that is running on the user's computer.

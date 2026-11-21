@@ -1,6 +1,6 @@
 [project]
 name = "reaper-mcp"
-version = "0.3.0"
+version = "0.3.1"
 description = "MCP server that lets Claude and other AI assistants control the REAPER DAW"
 readme = "README.md"
 license = "MIT"

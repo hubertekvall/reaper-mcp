@@ -8,7 +8,7 @@
 -- Load once via Actions > Show action list > New action > Load ReaScript,
 -- then run it. It keeps running in the background until stopped.
 
-local BRIDGE_VERSION = "0.3.0"
+local BRIDGE_VERSION = "0.3.1"
 local HEARTBEAT_INTERVAL = 1.0 -- seconds
 
 local M = { version = BRIDGE_VERSION }
@@ -1872,7 +1872,10 @@ end
 local CMD_RENDER_RECENT = 42230 -- File: Render project, using the most recent render settings, auto-close dialog
 local WAV_24BIT = "ZXZhdxgAAQ==" -- RENDER_FORMAT for 24-bit PCM WAV
 local RENDER_NUM_KEYS = { "RENDER_BOUNDSFLAG", "RENDER_STARTPOS", "RENDER_ENDPOS", "RENDER_SETTINGS",
-  "RENDER_CHANNELS", "RENDER_ADDTOPROJ" }
+  "RENDER_CHANNELS", "RENDER_ADDTOPROJ", "RENDER_SRATE", "RENDER_DITHER", "RENDER_NORMALIZE" }
+-- RENDER_SETTINGS source values, verified on REAPER 7.84: 0 = master mix, 3 = selected tracks (stems),
+-- 128 = selected tracks through the master. (2 on its own renders the master mix.)
+local RENDER_STEMS, RENDER_STEMS_VIA_MASTER = 3, 128
 local RENDER_STR_KEYS = { "RENDER_FILE", "RENDER_PATTERN", "RENDER_FORMAT" }
 
 -- Render a time range of the master mix, or of chosen tracks, to WAV files. The project's own
@@ -1906,11 +1909,13 @@ function commands.render(p)
     reaper.GetSetProjectInfo(0, "RENDER_ENDPOS", e, true)
     reaper.GetSetProjectInfo(0, "RENDER_CHANNELS", 2, true)
     reaper.GetSetProjectInfo(0, "RENDER_ADDTOPROJ", 0, true)
+    reaper.GetSetProjectInfo(0, "RENDER_NORMALIZE", 0, true) -- measure the real levels
+    reaper.GetSetProjectInfo(0, "RENDER_DITHER", 0, true)
     local settings = 0 -- master mix
     if #tracks > 0 then
       for _, entry in ipairs(saved_sel) do reaper.SetTrackSelected(entry[1], false) end
       for _, tr in ipairs(tracks) do reaper.SetTrackSelected(tr, true) end
-      settings = p.through_master and 128 or 2 -- selected tracks via master / stems only
+      settings = p.through_master and RENDER_STEMS_VIA_MASTER or RENDER_STEMS
     end
     reaper.GetSetProjectInfo(0, "RENDER_SETTINGS", settings, true)
     reaper.Main_OnCommand(CMD_RENDER_RECENT, 0)

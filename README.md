@@ -30,7 +30,7 @@ Requires REAPER 7 and Python 3.11+ (or [uv](https://docs.astral.sh/uv/)).
    clearly marked block to `Scripts\__startup.lua` that runs it whenever REAPER starts (your own
    startup code is kept; `--no-autostart` removes the block again). For a portable REAPER install,
    add `--resource-path <folder>` (REAPER shows it under *Options > Show REAPER resource path*).
-2. Restart REAPER. The console prints `reaper-mcp bridge 0.3.0 running`. Without `--autostart`,
+2. Restart REAPER. The console prints `reaper-mcp bridge 0.3.1 running`. Without `--autostart`,
    load and run the script yourself: *Actions > Show action list > New action > Load ReaScript*.
    After updating reaper-mcp, run `install-bridge` again and restart REAPER (or the script);
    `reaper_status` warns when REAPER is still running an older bridge.
