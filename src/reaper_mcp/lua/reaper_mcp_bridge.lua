@@ -1586,7 +1586,7 @@ end
 -- Look for the plug-in parameter that selects the sidechain/detector input and point it at the aux input.
 local function route_detector(tr, fx)
   local _, fxname = reaper.TrackFX_GetFXName(tr, fx, "")
-  if fxname:find("ReaComp") or fxname:find("ReaGate") or fxname:find("ReaXcomp") then
+  if fxname:find("ReaComp") then
     -- Cockos plug-ins: "SignIn" selects the detector input (0 = main inputs, 2 = auxiliary inputs 3/4).
     -- Confirmed in ReaComp on REAPER 7.84; "AudIn" is a different setting.
     for i = 0, reaper.TrackFX_GetNumParams(tr, fx) - 1 do

@@ -108,8 +108,8 @@ def register(mcp: MCPServer, request: Request) -> None:
     ) -> dict[str, Any]:
         """Sidechain: send from_track (e.g. the kick) into channels 3/4 of to_track (e.g. the bass), so a
         compressor or gate there can react to it. If fx names that plug-in, its detector/sidechain input
-        parameter is switched to the auxiliary input where that can be done automatically (ReaComp, ReaGate,
-        ReaXcomp, and plug-ins with a detector/sidechain selector). Otherwise the result says to enable the
+        parameter is switched to the auxiliary input where that can be done automatically (ReaComp, and
+        plug-ins whose detector/sidechain selector reads "aux" or "sidechain"). Otherwise the result says to enable the
         plug-in's sidechain input in its own window."""
         return await request(
             "create_sidechain",
