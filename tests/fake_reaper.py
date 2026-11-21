@@ -317,9 +317,15 @@ class FakeReaper:
     def GetEnvelopeStateChunk(self, env, _buf, _undo):
         return (True, f"<ENV\nACT {int(env.active)} -1\nVIS {int(env.visible)} 1 1\n>\n")
     def SetEnvelopeStateChunk(self, env, chunk, _undo):
-        env.active = "\nACT 1" in chunk
+        # Like REAPER 7.84: ACT only sticks once the envelope has points.
+        if env.points or env.items:
+            env.active = "\nACT 1" in chunk
         env.visible = "\nVIS 1" in chunk
         return True
+    def GetSetEnvelopeInfo_String(self, env, key, value, is_set):
+        if key == "ACTIVE" and is_set and (env.points or env.items):
+            env.active = value == "1"
+        return (True, "1" if env.active else "0") if key == "ACTIVE" else (False, "")
     def TrackList_AdjustWindows(self, _minor): pass
     def GetFXEnvelope(self, tr, fx, param, create):
         key = (tr.fx[fx], param)

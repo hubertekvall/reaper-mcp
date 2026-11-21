@@ -11,7 +11,7 @@ from mcp.types import ToolAnnotations
 
 from . import __version__
 
-BRIDGE_VERSION = "0.2.1"  # must match BRIDGE_VERSION in lua/reaper_mcp_bridge.lua
+BRIDGE_VERSION = "0.2.2"  # must match BRIDGE_VERSION in lua/reaper_mcp_bridge.lua
 from . import tools_editing, tools_routing
 from .bridge import Bridge, BridgeError
 

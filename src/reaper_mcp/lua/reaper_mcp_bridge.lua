@@ -8,7 +8,7 @@
 -- Load once via Actions > Show action list > New action > Load ReaScript,
 -- then run it. It keeps running in the background until stopped.
 
-local BRIDGE_VERSION = "0.2.1"
+local BRIDGE_VERSION = "0.2.2"
 local HEARTBEAT_INTERVAL = 1.0 -- seconds
 
 local M = { version = BRIDGE_VERSION }
@@ -1662,7 +1662,9 @@ end
 
 -- REAPER rebuilds envelopes inserted through the track chunk as inactive and hidden,
 -- so switch them on through the envelope's own state chunk.
+-- REAPER ignores ACT on an envelope without points, so this runs again after points are written.
 local function activate_envelope(env)
+  if reaper.GetSetEnvelopeInfo_String then reaper.GetSetEnvelopeInfo_String(env, "ACTIVE", "1", true) end
   local ok, st = reaper.GetEnvelopeStateChunk(env, "", false)
   if not ok then return end
   local new = st:gsub("\nACT 0", "\nACT 1"):gsub("\nVIS 0", "\nVIS 1")
@@ -1756,6 +1758,7 @@ local function write_points(env, info, points, p)
       point_shape(pt.shape), pt.tension or 0, false, true)
   end
   reaper.Envelope_SortPointsEx(env, ai)
+  activate_envelope(env)
   local _, ename = reaper.GetEnvelopeName(env, "")
   return json.object({
     envelope = ename, points_written = #points, start = lo, ["end"] = hi,

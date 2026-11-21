@@ -146,7 +146,9 @@ async def test_pan_mute_and_fx_parameter_automation(call):
     assert [p["value"] for p in read["points"]] == [-1, 1]
 
     await call("write_automation", track="Keys", target="mute", points=[{"time": 0, "value": True, "shape": "square"}])
-    assert track(call, "Keys").envs["MUTEENV"].points[0][1] == 0  # REAPER: 0 = muted, 1 = unmuted
+    mute_env = track(call, "Keys").envs["MUTEENV"]
+    assert mute_env.points[0][1] == 0  # REAPER: 0 = muted, 1 = unmuted
+    assert mute_env.active and mute_env.visible
     assert (await call("get_automation", track="Keys", target="mute"))["points"][0]["value"] is True
 
     await call("write_automation", track="Drums", target={"fx": "ReaEQ", "param": "Gain"}, points=[
