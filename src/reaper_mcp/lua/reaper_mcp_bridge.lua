@@ -8,7 +8,7 @@
 -- Load once via Actions > Show action list > New action > Load ReaScript,
 -- then run it. It keeps running in the background until stopped.
 
-local BRIDGE_VERSION = "0.2.2"
+local BRIDGE_VERSION = "0.2.3"
 local HEARTBEAT_INTERVAL = 1.0 -- seconds
 
 local M = { version = BRIDGE_VERSION }
@@ -1587,13 +1587,14 @@ end
 local function route_detector(tr, fx)
   local _, fxname = reaper.TrackFX_GetFXName(tr, fx, "")
   if fxname:find("ReaComp") or fxname:find("ReaGate") or fxname:find("ReaXcomp") then
-    -- Cockos plug-ins: "AudIn" is the detector's input channel pair (0 = main 1/2, 2 = aux 3/4).
+    -- Cockos plug-ins: "SignIn" selects the detector input (0 = main inputs, 2 = auxiliary inputs 3/4).
+    -- Confirmed in ReaComp on REAPER 7.84; "AudIn" is a different setting.
     for i = 0, reaper.TrackFX_GetNumParams(tr, fx) - 1 do
       local _, name = reaper.TrackFX_GetParamName(tr, fx, i, "")
-      if name == "AudIn" then
+      if name == "SignIn" then
         reaper.TrackFX_SetParamNormalized(tr, fx, i, solve_display(tr, fx, i, 2))
         local _, shown = reaper.TrackFX_GetFormattedParamValue(tr, fx, i, "")
-        return "AudIn = " .. shown .. " (auxiliary input 3/4)"
+        return "SignIn = " .. shown .. " (detector: auxiliary inputs 3/4)"
       end
     end
   end

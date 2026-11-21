@@ -49,7 +49,8 @@ def fake_plugin(name: str) -> FX:
         return FX(name, params=[
             ["Threshold", 1.0, lambda v: f"{-60 + 60 * v:.1f} dB"],
             ["Ratio", 0.1, lambda v: f"{1 + 19 * v:.1f}:1"],
-            # Real ReaComp: detector input as a channel index, displayed as a plain number 0..1084.
+            # Real ReaComp: SignIn is the detector input (0 = main, 2 = aux), shown as a number 0..1084.
+            ["SignIn", 0.0, lambda v: f"{round(v * 1084)}"],
             ["AudIn", 0.0, lambda v: f"{round(v * 1084)}"],
         ])
     if "ReaVerbate" in name:

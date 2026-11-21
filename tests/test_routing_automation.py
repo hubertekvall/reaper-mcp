@@ -105,7 +105,7 @@ async def test_sidechain_sets_detector_input(call):
     out = await call("create_sidechain", from_track="Kick", to_track="Bass", fx="ReaComp")
     assert out["send"]["dest_channels"] == "3/4" and out["send"]["mode"] == "post_fx"
     assert out["target_channels"] == 4
-    assert out["detector"] == "AudIn = 2 (auxiliary input 3/4)"
+    assert out["detector"] == "SignIn = 2 (detector: auxiliary inputs 3/4)"
     assert call.fake.sends[0].info["I_MIDIFLAGS"] == 31
 
     plain = await call("create_sidechain", from_track="Kick", to_track="Keys", fx="ReaSynth")
