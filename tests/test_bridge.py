@@ -37,7 +37,7 @@ def test_lua_json_rejects_garbage(env):
 
 async def test_ping(running):
     info = await running.bridge.request("ping")
-    assert info["bridge_version"] == "0.2.3"
+    assert info["bridge_version"] == "0.3.0"
     assert info["saved"] is True and info["unsaved_changes"] is False
     assert info["project"] == "test.rpp"
 
