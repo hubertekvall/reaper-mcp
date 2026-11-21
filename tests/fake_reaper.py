@@ -41,16 +41,46 @@ class FX(Obj):
     preset: str = ""
     # (name, normalized value, display function)
     params: list = field(default_factory=list)
+    wet: float = 0.5
 
 
 def fake_plugin(name: str) -> FX:
-    if "ReaEQ" in name or "ReaComp" in name:
+    if "ReaComp" in name:
+        return FX(name, params=[
+            ["Threshold", 1.0, lambda v: f"{-60 + 60 * v:.1f} dB"],
+            ["Ratio", 0.1, lambda v: f"{1 + 19 * v:.1f}:1"],
+            ["Detector input", 0.0, lambda v: "Main L+R" if v < 0.5 else "Aux L+R"],
+        ])
+    if "ReaEQ" in name:
         return FX(name, params=[
             ["Gain", 0.5, lambda v: f"{-24 + 48 * v:.1f} dB"],
             ["Frequency", 0.5, lambda v: f"{20 * 1000 ** v:.0f} Hz"],
             ["Mode", 0.0, lambda v: "Low shelf" if v < 0.5 else "Band"],
         ])
     return FX(name, params=[["Volume", 0.8, lambda v: f"{v * 100:.0f} %"]])
+
+
+@dataclass(eq=False)
+class Envelope(Obj):
+    name: str
+    points: list = field(default_factory=list)  # [time, value, shape, tension, selected]
+    items: list = field(default_factory=list)  # [position, length, points]
+
+    def pts(self, ai):
+        return self.points if ai < 0 else self.items[ai][2]
+
+
+@dataclass(eq=False)
+class Send:
+    src: Track
+    dst: Track
+    info: dict = field(default_factory=lambda: {
+        "D_VOL": 1.0, "D_PAN": 0.0, "B_MUTE": 0.0, "I_SENDMODE": 0.0,
+        "I_SRCCHAN": 0.0, "I_DSTCHAN": 0.0, "I_MIDIFLAGS": 0.0,
+    })
+
+
+ENV_DISPLAY = {"VOLENV2": "Volume", "PANENV2": "Pan", "WIDTHENV2": "Width", "MUTEENV": "Mute", "VOLENV3": "Trim Volume"}
 
 
 @dataclass(eq=False)
@@ -101,10 +131,12 @@ class Track(Obj):
     guid: str = field(default_factory=new_guid)
     info: dict = field(default_factory=dict)
     selected: bool = False
+    envs: dict = field(default_factory=dict)  # chunk name -> Envelope
+    fx_envs: dict = field(default_factory=dict)  # (fx, param) -> Envelope
 
     def __post_init__(self) -> None:
         self.info = {
-            "I_FOLDERDEPTH": 0.0, "D_VOL": 1.0, "D_PAN": 0.0, "B_MUTE": 0.0, "I_SOLO": 0.0,
+            "I_NCHAN": 2.0, "I_AUTOMODE": 0.0, "I_FOLDERDEPTH": 0.0, "D_VOL": 1.0, "D_PAN": 0.0, "B_MUTE": 0.0, "I_SOLO": 0.0,
             "I_RECARM": 0.0, "I_RECINPUT": 0.0, "I_RECMODE": 0.0, "I_RECMON": 0.0,
             "B_MAINSEND": 1.0, "I_CUSTOMCOLOR": 0.0, "B_PHASE": 0.0, **self.info,
         }
@@ -113,11 +145,14 @@ class Track(Obj):
             i.track = self
 
 
+WET = 1000  # pseudo parameter index for the ":wet" ident
+
 INSTALLED_FX = [
     ("VST: ReaEQ (Cockos)", "reaeq.dll"),
     ("VST: ReaComp (Cockos)", "reacomp.dll"),
     ("VSTi: ReaSynth (Cockos)", "reasynth.dll"),
     ("JS: Volume Adjustment", "volume"),
+    ("VST: ReaVerbate (Cockos)", "reaverbate.dll"),
 ]
 
 
@@ -137,6 +172,7 @@ class FakeReaper:
         self.repeat = 0
         self.time_sel = (0.0, 0.0)
         self.commands: list[int] = []
+        self.sends: list[Send] = []
 
     # helpers
     def all_items(self) -> list[Item]:
@@ -197,7 +233,7 @@ class FakeReaper:
             self.play_state = 5
 
     def ValidatePtr2(self, _proj, ptr, typename):
-        kinds = {"MediaTrack*": Track, "MediaItem*": Item, "MediaItem_Take*": Take}
+        kinds = {"MediaTrack*": Track, "MediaItem*": Item, "MediaItem_Take*": Take, "TrackEnvelope*": Envelope}
         cls = kinds.get(typename)
         return cls is not None and isinstance(ptr, cls)
     def ValidatePtr(self, ptr, typename): return self.ValidatePtr2(0, ptr, typename)
@@ -232,8 +268,68 @@ class FakeReaper:
         at = self.tracks.index(anchor) if anchor in self.tracks else len(self.tracks)
         self.tracks[at:at] = sel
         return True
-    def GetTrackNumSends(self, _tr, _cat): return 0
-    def CountTrackEnvelopes(self, _tr): return 0
+    def IsProjectDirty(self, _proj): return 0
+
+    # --- routing ---
+    def _sends(self, tr, cat):
+        if cat == 0:
+            return [x for x in self.sends if x.src is tr]
+        if cat == -1:
+            return [x for x in self.sends if x.dst is tr]
+        return []
+    def GetTrackNumSends(self, tr, cat): return len(self._sends(tr, cat))
+    def CreateTrackSend(self, src, dst):
+        self.sends.append(Send(src, dst))
+        return len(self._sends(src, 0)) - 1
+    def RemoveTrackSend(self, tr, cat, i): self.sends.remove(self._sends(tr, cat)[i]); return True
+    def GetTrackSendInfo_Value(self, tr, cat, i, key):
+        snd = self._sends(tr, cat)[i]
+        if key == "P_DESTTRACK":
+            return snd.dst
+        if key == "P_SRCTRACK":
+            return snd.src
+        return snd.info.get(key, 0.0)
+    def SetTrackSendInfo_Value(self, tr, cat, i, key, v):
+        self._sends(tr, cat)[i].info[key] = float(v)
+        return True
+
+    # --- envelopes ---
+    def CountTrackEnvelopes(self, tr): return len(tr.envs) + len(tr.fx_envs)
+    def GetTrackEnvelopeByChunkName(self, tr, name): return tr.envs.get(name.lstrip("<"))
+    def GetTrackStateChunk(self, tr, _buf, _undo):
+        envs = "".join(f"<{n}\nACT 1 -1\n>\n" for n in tr.envs)
+        return (True, f"<TRACK\nNAME \"{tr.name}\"\n{envs}<FXCHAIN\nSHOW 0\n>\n<ITEM\n>\n>\n")
+    def SetTrackStateChunk(self, tr, chunk, _undo):
+        assert chunk.index("<FXCHAIN") > max(chunk.rfind("ENV"), 0), "envelopes must come before the FX chain"
+        for name in re.findall(r"^<(\w*ENV\d?)$", chunk, re.M):
+            tr.envs.setdefault(name, Envelope(ENV_DISPLAY.get(name, name)))
+        return True
+    def GetFXEnvelope(self, tr, fx, param, create):
+        key = (tr.fx[fx], param)
+        if key not in tr.fx_envs and create:
+            tr.fx_envs[key] = Envelope(f"{tr.fx[fx].params[param][0]} / {tr.fx[fx].name}")
+        return tr.fx_envs.get(key)
+    def GetEnvelopeName(self, env, _buf=""): return (True, env.name)
+    def GetEnvelopeScalingMode(self, env): return 1 if "Volume" in env.name else 0
+    # Fake "fader scaling": a square-root curve, so conversions are visible in tests.
+    def ScaleToEnvelopeMode(self, mode, v): return v ** 0.5 if mode == 1 else v
+    def ScaleFromEnvelopeMode(self, mode, v): return v ** 2 if mode == 1 else v
+    def InsertEnvelopePointEx(self, env, ai, t, v, shape, tension, sel, _nosort):
+        env.pts(ai).append([t, v, shape, tension, sel])
+        return True
+    def DeleteEnvelopePointRangeEx(self, env, ai, a, b):
+        pts = env.pts(ai)
+        pts[:] = [p for p in pts if not (a <= p[0] < b)]
+        return True
+    def Envelope_SortPointsEx(self, env, ai): env.pts(ai).sort(key=lambda p: p[0]); return True
+    def CountEnvelopePointsEx(self, env, ai): return len(env.pts(ai))
+    def GetEnvelopePointEx(self, env, ai, i): return (True, *env.pts(ai)[i])
+    def InsertAutomationItem(self, env, _pool, pos, length):
+        env.items.append([pos, length, []])
+        return len(env.items) - 1
+    def CountAutomationItems(self, env): return len(env.items)
+    def GetSetAutomationItemInfo(self, env, i, key, _v, _set):
+        return {"D_POSITION": env.items[i][0], "D_LENGTH": env.items[i][1]}.get(key, 0.0)
     def CountTrackMediaItems(self, tr): return len(tr.items)
     def GetTrackMediaItem(self, tr, i): return tr.items[i] if 0 <= i < len(tr.items) else None
 
@@ -270,7 +366,14 @@ class FakeReaper:
     def TrackFX_GetNumParams(self, tr, i): return len(tr.fx[i].params)
     def TrackFX_GetParamName(self, tr, i, p, _buf=""): return (True, tr.fx[i].params[p][0])
     def TrackFX_GetParamNormalized(self, tr, i, p): return tr.fx[i].params[p][1]
-    def TrackFX_SetParamNormalized(self, tr, i, p, v): tr.fx[i].params[p][1] = float(v); return True
+    def TrackFX_SetParamNormalized(self, tr, i, p, v):
+        if p == WET:
+            tr.fx[i].wet = float(v)
+        else:
+            tr.fx[i].params[p][1] = float(v)
+        return True
+    def TrackFX_GetParam(self, tr, i, p): return (tr.fx[i].params[p][1], 0.0, 1.0)
+    def TrackFX_GetParamFromIdent(self, tr, i, ident): return WET if ident == ":wet" else -1
     def TrackFX_GetFormattedParamValue(self, tr, i, p, _buf=""):
         name, v, fmt = tr.fx[i].params[p]
         return (True, fmt(v))

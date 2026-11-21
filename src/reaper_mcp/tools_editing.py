@@ -56,16 +56,17 @@ def register(mcp: MCPServer, request: Request) -> None:
         folder_depth: int | None = None,
         main_send: bool | None = None,
         move_to: int | None = None,
+        automation_mode: Literal["trim_read", "read", "touch", "write", "latch", "latch_preview"] | None = None,
     ) -> dict[str, Any]:
         """Change a track: name, volume (dB), pan (-1..1), mute, solo, phase, color ('#rrggbb', '' to clear),
         folder_depth (1 = starts a folder, 0 = normal, -1 = closes one folder level), main_send (send to
-        parent/master) and move_to (new 0-based position). Only the given fields change."""
+        parent/master), move_to (new 0-based position) and automation_mode. Only the given fields change."""
         return await request(
             "update_track",
             _clean(
                 track=track, name=name, volume_db=volume_db, pan=pan, mute=mute, solo=solo,
                 phase_invert=phase_invert, color=color, folder_depth=folder_depth,
-                main_send=main_send, move_to=move_to,
+                main_send=main_send, move_to=move_to, automation_mode=automation_mode,
             ),
         )
 
@@ -185,10 +186,18 @@ def register(mcp: MCPServer, request: Request) -> None:
         return await request("create_midi_item", _clean(track=track, start=start, end=end, name=name))
 
     @mcp.tool(annotations=READ)
-    async def get_midi(item: Item, include_cc: bool = True) -> dict[str, Any]:
-        """Read the notes (pitch, velocity, channel, start and length in beats and seconds) and CC,
-        pitch bend and program events of a MIDI item. Beats are quarter notes from project start."""
-        return await request("get_midi", {"item": item, "cc": include_cc})
+    async def get_midi(
+        item: Item, include_cc: bool = True, summary: bool = False, offset: int = 0, limit: int = 200
+    ) -> dict[str, Any]:
+        """Read a MIDI item: notes (pitch, velocity, channel, start and length in beats and seconds) and CC,
+        pitch bend and program events. Beats are quarter notes from project start.
+
+        Always includes total_notes, pitch_counts, pitch_range and velocity_range. summary=true returns only
+        that overview, which is the best first look at a dense item. Notes come in pages of `limit`;
+        when next_offset is present, call again with offset=next_offset for the rest."""
+        return await request(
+            "get_midi", {"item": item, "cc": include_cc, "summary": summary, "offset": offset, "limit": limit}
+        )
 
     @mcp.tool(annotations=EDIT)
     async def add_midi_notes(item: Item, notes: list[dict[str, Any]], relative: bool = True) -> dict[str, Any]:

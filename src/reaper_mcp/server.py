@@ -10,7 +10,9 @@ from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 from mcp.types import ToolAnnotations
 
 from . import __version__
-from . import tools_editing
+
+BRIDGE_VERSION = "0.2.0"  # must match BRIDGE_VERSION in lua/reaper_mcp_bridge.lua
+from . import tools_editing, tools_routing
 from .bridge import Bridge, BridgeError
 
 INSTRUCTIONS = """\
@@ -46,7 +48,13 @@ def create_server(bridge: Bridge | None = None) -> MCPServer:
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def reaper_status() -> dict[str, Any]:
         """Check that REAPER and the bridge are reachable; returns versions and the open project."""
-        return await request("ping")
+        info = await request("ping")
+        if info.get("bridge_version") != BRIDGE_VERSION:
+            info["warning"] = (
+                f"REAPER is running bridge script {info.get('bridge_version')}, but this server expects "
+                f"{BRIDGE_VERSION}. Run `reaper-mcp install-bridge`, then stop and start the script in REAPER."
+            )
+        return info
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def get_project_state(include_items: bool = True) -> dict[str, Any]:
@@ -83,6 +91,7 @@ def create_server(bridge: Bridge | None = None) -> MCPServer:
         return await request("call", params)
 
     tools_editing.register(mcp, request)
+    tools_routing.register(mcp, request)
 
     @mcp.resource("reaper://project", mime_type="application/json")
     async def project_resource() -> str:

@@ -4,8 +4,8 @@ An [MCP](https://modelcontextprotocol.io) server that lets Claude (or any MCP cl
 [REAPER](https://www.reaper.fm) DAW: read the project, edit items and MIDI, set up tracks, routing,
 FX and automation.
 
-> **Status: step 2 of 4.** Project reading, editing (tracks, items, MIDI, FX, transport, tempo,
-> markers) and a generic ReaScript call. Routing, automation and render/analysis tools come next.
+> **Status: step 3 of 4.** Project reading, editing, routing and automation. Render and analysis
+> tools come next.
 
 ## How it works
 
@@ -31,6 +31,8 @@ Requires REAPER 7 and Python 3.11+ (or [uv](https://docs.astral.sh/uv/)).
    resource path*).
 2. In REAPER: *Actions > Show action list > New action > Load ReaScript*, pick that file, and run it.
    The console prints `reaper-mcp bridge 0.1.0 running`.
+   After updating reaper-mcp, run `install-bridge` again and restart the script in REAPER;
+   `reaper_status` warns when REAPER is still running an older bridge.
 3. Check the connection:
    ```
    uvx --from git+https://github.com/hubertekvall/reaper-mcp reaper-mcp doctor
@@ -63,6 +65,8 @@ GUID or `{"track": <track>, "index": <n>}`. A **time** is seconds, `{"beats": <q
 | FX | `list_installed_fx`, `add_fx`, `remove_fx`, `update_fx` (bypass, offline, preset, reorder), `get_fx_params`, `set_fx_params` (normalized, or by the value the plug-in displays, such as `-6` dB) |
 | Transport | `transport` (play, stop, pause, record, go to), `set_time_selection`, `set_tempo` |
 | Markers | `add_marker` (markers and regions), `update_marker`, `delete_marker` |
+| Routing | `create_send`, `update_send` (level, pan, mute, pre/post, channels, MIDI, remove), `create_fx_return` (reverb/delay/parallel bus fed by sends), `create_sidechain` (into channels 3/4, sets the detector input where possible). Folder buses: `create_folder`. |
+| Automation | `write_automation` (points with curve shapes, optionally as an automation item), `draw_automation` (ramps and sine/triangle/square/saw LFOs synced to beats), `get_automation`, `clear_automation`. Targets: volume, pan, width, mute, trim, or any FX parameter. Track automation mode via `update_track`. |
 | Anything else | `call_reaper_api`: any [ReaScript function](https://www.reaper.fm/sdk/reascript/reascripthelp.html), with optional undo |
 
 REAPER objects travel as references such as `{"$type": "MediaTrack", "index": 0}`,

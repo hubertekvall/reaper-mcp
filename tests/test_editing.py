@@ -200,12 +200,12 @@ async def test_fx_chain_and_parameters(call):
     found = await call("list_installed_fx", filter="rea")
     assert [f["name"] for f in found][:2] == ["VST: ReaEQ (Cockos)", "VST: ReaComp (Cockos)"]
 
-    added = await call("add_fx", track="Keys", name="ReaComp", preset="Vocal")
+    added = await call("add_fx", track="Keys", name="ReaEQ", preset="Vocal")
     assert added["index"] == 1 and added["params"] == 3
     fx = call.fake.tracks[2].fx[1]
     assert fx.preset == "Vocal"
 
-    params = await call("get_fx_params", track="Keys", fx="ReaComp", filter="gain")
+    params = await call("get_fx_params", track="Keys", fx="ReaEQ", filter="gain")
     assert params["params"] == [{"index": 0, "name": "Gain", "value": 0.5, "display": "0.0 dB"}]
 
     out = await call("set_fx_params", track="Keys", fx=1, params=[
@@ -216,7 +216,7 @@ async def test_fx_chain_and_parameters(call):
     assert [p["display"] for p in out] == ["-6.0 dB", "2000 Hz", "Band"]
     assert "not numeric" in await error_text(call, "set_fx_params", track="Keys", fx=1, params=[{"param": "Mode", "display_value": 3}])
 
-    await call("update_fx", track="Keys", fx="ReaComp", enabled=False, move_to=0)
+    await call("update_fx", track="Keys", fx="ReaEQ", enabled=False, move_to=0)
     assert call.fake.tracks[2].fx[0] is fx and fx.enabled is False
 
     assert await call("remove_fx", track="Keys", fx=0) is True
