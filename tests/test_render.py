@@ -63,7 +63,7 @@ def test_true_peak_catches_intersample_overs_and_phase_problems(tmp_path):
 
 async def test_render_master_mix_and_measure(call):
     fake = call.fake
-    fake.project_info.update({"RENDER_FILE": "C:/user/renders", "RENDER_SETTINGS": 1.0})
+    fake.project_info.update({"RENDER_FILE": "C:/user/renders", "RENDER_SETTINGS": 1.0, "RENDER_SRATE": 0.0, "RENDER_NORMALIZE": 1.0})
     result = await call("render", start=0.0, end=4.0, name="mix")
     (path,) = result["files"]
     assert path.endswith("mix.wav")
@@ -74,7 +74,9 @@ async def test_render_master_mix_and_measure(call):
     assert report["duration"] == pytest.approx(4.0)
     assert report["loudness"]["integrated_lufs"] == pytest.approx(-20, abs=0.2)
     # The user's own render settings are back.
+    assert job["RENDER_NORMALIZE"] == 0
     assert fake.project_info["RENDER_FILE"] == "C:/user/renders" and fake.project_info["RENDER_SETTINGS"] == 1.0
+    assert fake.project_info["RENDER_SRATE"] == 0 and fake.project_info["RENDER_NORMALIZE"] == 1
 
 
 async def test_render_stems_restores_track_selection(call):
@@ -83,7 +85,7 @@ async def test_render_stems_restores_track_selection(call):
     keys.selected = True
     result = await call("render", start=0.0, end=1.0, tracks=["Drums", "Kick"], name="stem", analyze=False)
     assert [p.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] for p in result["files"]] == ["stem-Drums.wav", "stem-Kick.wav"]
-    assert fake.renders[0]["RENDER_SETTINGS"] == 2 and "analysis" not in result
+    assert fake.renders[0]["RENDER_SETTINGS"] == 3 and "analysis" not in result
     assert [t.name for t in fake.tracks if t.selected] == ["Keys"]
 
     await call("render", start=0.0, end=1.0, tracks=["Drums"], through_master=True, analyze=False)

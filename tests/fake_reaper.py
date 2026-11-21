@@ -585,7 +585,7 @@ class FakeReaper:
         settings = int(info.get("RENDER_SETTINGS", 0))
         start, end = info.get("RENDER_STARTPOS", 0.0), info.get("RENDER_ENDPOS", 0.0)
         pattern = info.get("RENDER_PATTERN", "untitled")
-        names = [pattern.replace("$track", t.name) for t in self.tracks if t.selected] if settings in (2, 128) else [pattern]
+        names = [pattern.replace("$track", t.name) for t in self.tracks if t.selected] if settings == 3 or settings & 128 else [pattern]
         rate, n = 48000, int(round((end - start) * 48000))
         tone = 10 ** (-20 / 20) * np.sin(2 * np.pi * 1000 * np.arange(n) / rate)
         targets = []
@@ -594,6 +594,7 @@ class FakeReaper:
             write_wav(path, np.column_stack([tone, tone]), rate)
             targets.append(path)
         self.renders.append({k: v for k, v in info.items() if k.startswith("RENDER_")})
+        info["RENDER_SRATE"] = 44100.0  # REAPER fills in the rate it used
         info["RENDER_TARGETS"] = ";".join(targets)
 
     # --- markers and regions ---
