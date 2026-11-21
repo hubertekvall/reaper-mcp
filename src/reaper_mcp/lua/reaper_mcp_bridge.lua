@@ -32,7 +32,8 @@ local escapes = {
 }
 
 local function encode_string(s)
-  return '"' .. s:gsub('[%c"\\]', function(c)
+  -- Explicit byte ranges: %c depends on the C locale and can match UTF-8 bytes (macOS).
+  return '"' .. s:gsub('[\0-\31\127"\\]', function(c)
     return escapes[c] or string.format("\\u%04x", c:byte())
   end) .. '"'
 end
@@ -506,6 +507,818 @@ function commands.project_state(p)
     markers = markers,
     regions = regions,
   })
+end
+
+---------------------------------------------------------------------------
+-- Lookups shared by the editing commands
+---------------------------------------------------------------------------
+
+local function is_null(v) return v == nil or v == json.null end
+
+local function track_name(tr)
+  local _, name = reaper.GetTrackName(tr)
+  return name
+end
+
+-- Track spec: 0-based index, "master", a GUID string, a track name, or an object reference.
+local function get_track(spec)
+  if is_null(spec) then error("a track is required", 0) end
+  if type(spec) == "number" then
+    local tr = reaper.GetTrack(0, math.tointeger(spec) or -1)
+    if not tr then error("no track at index " .. tostring(spec), 0) end
+    return tr
+  end
+  if type(spec) == "string" then
+    if spec:lower() == "master" then return reaper.GetMasterTrack(0) end
+    if spec:match("^{.*}$") then return resolve_ref({ ["$type"] = "MediaTrack", guid = spec }) end
+    local found
+    for i = 0, reaper.CountTracks(0) - 1 do
+      local tr = reaper.GetTrack(0, i)
+      if track_name(tr) == spec then
+        if found then error("more than one track is named '" .. spec .. "'; use its index", 0) end
+        found = tr
+      end
+    end
+    if not found then error("no track named '" .. spec .. "'", 0) end
+    return found
+  end
+  if type(spec) == "table" then return resolve_ref(spec) end
+  error("bad track reference", 0)
+end
+
+local function track_index(tr)
+  return math.tointeger(reaper.GetMediaTrackInfo_Value(tr, "IP_TRACKNUMBER")) - 1
+end
+
+-- Item spec: GUID string, {"track": t, "index": i}, or an object reference.
+local function get_item(spec)
+  if type(spec) == "string" then return resolve_ref({ ["$type"] = "MediaItem", guid = spec }) end
+  if type(spec) == "table" and not is_null(spec.track) and not spec["$type"] then
+    local tr = get_track(spec.track)
+    local item = reaper.GetTrackMediaItem(tr, math.tointeger(spec.index or 0))
+    if not item then error("track has no item at index " .. tostring(spec.index), 0) end
+    return item
+  end
+  if type(spec) == "table" then return resolve_ref(spec) end
+  error("bad item reference: use the item's GUID or {track, index}", 0)
+end
+
+local function get_items(specs)
+  local out = {}
+  for i = 1, (specs.n or #specs) do out[i] = get_item(specs[i]) end
+  return out
+end
+
+local function get_take(spec)
+  local item = get_item(spec)
+  local take
+  if type(spec) == "table" and spec.take then take = reaper.GetTake(item, spec.take)
+  else take = reaper.GetActiveTake(item) end
+  if not take then error("item has no take", 0) end
+  return take, item
+end
+
+local function item_guid(item) return guid_of(item, "MediaItem") end
+
+local function item_summary(item)
+  local take = reaper.GetActiveTake(item)
+  return json.object({
+    guid = item_guid(item),
+    track = track_index(reaper.GetMediaItem_Track(item)),
+    position = reaper.GetMediaItemInfo_Value(item, "D_POSITION"),
+    length = reaper.GetMediaItemInfo_Value(item, "D_LENGTH"),
+    name = take and reaper.GetTakeName(take) or json.null,
+    midi = take and reaper.TakeIsMIDI(take) or false,
+  })
+end
+
+-- Time spec: seconds, {"beats": qn from project start}, or {"bar": n, "beat": b} (1-based).
+local function to_time(spec)
+  if is_null(spec) then return nil end
+  if type(spec) == "number" then return spec end
+  if type(spec) == "table" then
+    if spec.seconds then return spec.seconds end
+    if spec.beats then return reaper.TimeMap2_QNToTime(0, spec.beats) end
+    if spec.bar then
+      local _, qn_start, _, _, denom = reaper.TimeMap_GetMeasureInfo(0, math.tointeger(spec.bar) - 1)
+      local beat = (spec.beat or 1) - 1
+      return reaper.TimeMap2_QNToTime(0, qn_start + beat * 4 / denom)
+    end
+  end
+  error("bad time: use seconds, {beats} or {bar, beat}", 0)
+end
+
+local function to_qn(t) return reaper.TimeMap2_timeToQN(0, t) end
+
+local function db_to_gain(v) return 10 ^ (v / 20) end
+
+local function select_only_items(items)
+  reaper.SelectAllMediaItems(0, false)
+  for _, item in ipairs(items) do reaper.SetMediaItemSelected(item, true) end
+end
+
+local function run(p, label, fn)
+  return with_undo(p.undo or label, fn)
+end
+
+---------------------------------------------------------------------------
+-- Tracks
+---------------------------------------------------------------------------
+
+local function apply_track_props(tr, p)
+  if not is_null(p.name) then reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", p.name, true) end
+  if not is_null(p.volume_db) then reaper.SetMediaTrackInfo_Value(tr, "D_VOL", db_to_gain(p.volume_db)) end
+  if not is_null(p.pan) then reaper.SetMediaTrackInfo_Value(tr, "D_PAN", p.pan) end
+  if not is_null(p.mute) then reaper.SetMediaTrackInfo_Value(tr, "B_MUTE", p.mute and 1 or 0) end
+  if not is_null(p.solo) then reaper.SetMediaTrackInfo_Value(tr, "I_SOLO", p.solo and 2 or 0) end
+  if not is_null(p.phase_invert) then reaper.SetMediaTrackInfo_Value(tr, "B_PHASE", p.phase_invert and 1 or 0) end
+  if not is_null(p.color) then
+    local c = p.color
+    if type(c) == "string" then
+      local r, g, b = c:match("^#?(%x%x)(%x%x)(%x%x)$")
+      if not r then error("color must be '#rrggbb'", 0) end
+      reaper.SetMediaTrackInfo_Value(tr, "I_CUSTOMCOLOR",
+        reaper.ColorToNative(tonumber(r, 16), tonumber(g, 16), tonumber(b, 16)) | 0x1000000)
+    else
+      reaper.SetMediaTrackInfo_Value(tr, "I_CUSTOMCOLOR", 0)
+    end
+  end
+  if not is_null(p.folder_depth) then reaper.SetMediaTrackInfo_Value(tr, "I_FOLDERDEPTH", p.folder_depth) end
+  if not is_null(p.main_send) then reaper.SetMediaTrackInfo_Value(tr, "B_MAINSEND", p.main_send and 1 or 0) end
+end
+
+local function move_track(tr, to_index)
+  reaper.SetOnlyTrackSelected(tr)
+  local before = math.tointeger(to_index)
+  if before > track_index(tr) then before = before + 1 end
+  reaper.ReorderSelectedTracks(before, 0)
+end
+
+function commands.create_track(p)
+  return run(p, "Create track", function()
+    local idx = math.tointeger(p.index) or reaper.CountTracks(0)
+    reaper.InsertTrackAtIndex(idx, true)
+    local tr = reaper.GetTrack(0, idx)
+    apply_track_props(tr, p)
+    return json.object({ index = idx, guid = reaper.GetTrackGUID(tr) })
+  end)
+end
+
+function commands.update_track(p)
+  local tr = get_track(p.track)
+  return run(p, "Edit track", function()
+    apply_track_props(tr, p)
+    if not is_null(p.move_to) then move_track(tr, p.move_to) end
+    return track_info(tr, track_index(tr), false)
+  end)
+end
+
+function commands.delete_tracks(p)
+  local tracks = {}
+  for i = 1, (p.tracks.n or #p.tracks) do tracks[i] = get_track(p.tracks[i]) end
+  return run(p, "Delete tracks", function()
+    for _, tr in ipairs(tracks) do reaper.DeleteTrack(tr) end
+    return #tracks
+  end)
+end
+
+-- Put a contiguous run of tracks under a new folder track.
+function commands.create_folder(p)
+  local list = {}
+  for i = 1, (p.tracks.n or #p.tracks) do list[i] = track_index(get_track(p.tracks[i])) end
+  table.sort(list)
+  for i = 2, #list do
+    if list[i] ~= list[i - 1] + 1 then error("folder children must be adjacent tracks", 0) end
+  end
+  return run(p, "Create folder", function()
+    local first, last = list[1], list[#list]
+    reaper.InsertTrackAtIndex(first, true)
+    local folder = reaper.GetTrack(0, first)
+    apply_track_props(folder, { name = p.name, color = p.color })
+    reaper.SetMediaTrackInfo_Value(folder, "I_FOLDERDEPTH", 1)
+    local last_child = reaper.GetTrack(0, last + 1)
+    local depth = reaper.GetMediaTrackInfo_Value(last_child, "I_FOLDERDEPTH")
+    reaper.SetMediaTrackInfo_Value(last_child, "I_FOLDERDEPTH", depth - 1)
+    return json.object({ index = first, guid = reaper.GetTrackGUID(folder) })
+  end)
+end
+
+-- Record input spec: {"type": "audio", "channel": 1, "stereo": false}
+--                    {"type": "midi", "device": "all"|n, "channel": 0 (all) .. 16}
+--                    {"type": "none"}
+local function rec_input_value(spec)
+  if spec.type == "none" then return -1 end
+  if spec.type == "audio" then
+    local ch = math.tointeger(spec.channel or 1) - 1
+    if spec.stereo then return 1024 + ch end
+    return ch
+  end
+  if spec.type == "midi" then
+    local dev = (spec.device == nil or spec.device == "all") and 63 or math.tointeger(spec.device)
+    local chan = math.tointeger(spec.channel or 0)
+    return 4096 + (dev << 5) + chan
+  end
+  error("input type must be audio, midi or none", 0)
+end
+
+local MONITOR = { off = 0, on = 1, auto = 2 }
+local REC_MODE = { input = 0, output = 1, none = 2, midi_overdub = 7, midi_replace = 8 }
+
+local function apply_recording(tr, p)
+  if not is_null(p.input) then reaper.SetMediaTrackInfo_Value(tr, "I_RECINPUT", rec_input_value(p.input)) end
+  if not is_null(p.monitor) then
+    local m = MONITOR[p.monitor]
+    if not m then error("monitor must be off, on or auto", 0) end
+    reaper.SetMediaTrackInfo_Value(tr, "I_RECMON", m)
+  end
+  if not is_null(p.mode) then
+    local m = REC_MODE[p.mode]
+    if not m then error("mode must be input, output, none, midi_overdub or midi_replace", 0) end
+    reaper.SetMediaTrackInfo_Value(tr, "I_RECMODE", m)
+  end
+  if not is_null(p.arm) then reaper.SetMediaTrackInfo_Value(tr, "I_RECARM", p.arm and 1 or 0) end
+end
+
+function commands.setup_recording(p)
+  local tr = get_track(p.track)
+  return run(p, "Set up track for recording", function()
+    apply_recording(tr, p)
+    return track_info(tr, track_index(tr), false)
+  end)
+end
+
+function commands.create_instrument_track(p)
+  return run(p, "Create instrument track", function()
+    local idx = math.tointeger(p.index) or reaper.CountTracks(0)
+    reaper.InsertTrackAtIndex(idx, true)
+    local tr = reaper.GetTrack(0, idx)
+    apply_track_props(tr, { name = p.name or p.instrument, color = p.color })
+    local fx = reaper.TrackFX_AddByName(tr, p.instrument, false, -1)
+    if fx < 0 then
+      reaper.DeleteTrack(tr)
+      error("instrument not found: " .. p.instrument .. ". Use list_installed_fx to find the exact name.", 0)
+    end
+    apply_recording(tr, {
+      input = p.input or { type = "midi", device = "all", channel = 0 },
+      monitor = p.monitor or "on",
+      arm = p.arm,
+    })
+    return json.object({ index = idx, guid = reaper.GetTrackGUID(tr), fx_index = fx })
+  end)
+end
+
+---------------------------------------------------------------------------
+-- Media items
+---------------------------------------------------------------------------
+
+function commands.split_item(p)
+  local item = get_item(p.item)
+  local times = p.at
+  if getmetatable(times) ~= ARRAY_MT then times = { times } end
+  local list = {}
+  for i = 1, (times.n or #times) do list[i] = to_time(times[i]) end
+  table.sort(list, function(a, b) return a > b end)
+  return run(p, "Split item", function()
+    local pieces = {}
+    for _, t in ipairs(list) do
+      local right = reaper.SplitMediaItem(item, t)
+      if right then table.insert(pieces, 1, right) end
+    end
+    table.insert(pieces, 1, item)
+    local out = json.array()
+    for i, it in ipairs(pieces) do out[i] = item_summary(it) end
+    return out
+  end)
+end
+
+function commands.edit_item(p)
+  local item = get_item(p.item)
+  return run(p, "Edit item", function()
+    local function set(k, v) reaper.SetMediaItemInfo_Value(item, k, v) end
+    if not is_null(p.track) then reaper.MoveMediaItemToTrack(item, get_track(p.track)) end
+    -- Trimming keeps the audio in place: moving the left edge shifts the take offset too.
+    if not is_null(p.start) or not is_null(p["end"]) then
+      local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+      local len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+      local new_start = to_time(p.start) or pos
+      local new_end = to_time(p["end"]) or (pos + len)
+      if new_end <= new_start then error("end must be after start", 0) end
+      local delta = new_start - pos
+      for k = 0, reaper.CountTakes(item) - 1 do
+        local take = reaper.GetTake(item, k)
+        if take then
+          local rate = reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE")
+          local offs = reaper.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS")
+          reaper.SetMediaItemTakeInfo_Value(take, "D_STARTOFFS", offs + delta * rate)
+        end
+      end
+      set("D_POSITION", new_start)
+      set("D_LENGTH", new_end - new_start)
+    end
+    if not is_null(p.position) then set("D_POSITION", to_time(p.position)) end
+    if not is_null(p.mute) then set("B_MUTE", p.mute and 1 or 0) end
+    if not is_null(p.volume_db) then set("D_VOL", db_to_gain(p.volume_db)) end
+    if not is_null(p.fade_in) then set("D_FADEINLEN", p.fade_in) end
+    if not is_null(p.fade_out) then set("D_FADEOUTLEN", p.fade_out) end
+    if not is_null(p.lock) then set("C_LOCK", p.lock and 1 or 0) end
+    local take = reaper.GetActiveTake(item)
+    if take then
+      if not is_null(p.name) then reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", p.name, true) end
+      if not is_null(p.pitch) then reaper.SetMediaItemTakeInfo_Value(take, "D_PITCH", p.pitch) end
+      if not is_null(p.playrate) then reaper.SetMediaItemTakeInfo_Value(take, "D_PLAYRATE", p.playrate) end
+    end
+    return item_summary(item)
+  end)
+end
+
+function commands.delete_items(p)
+  local items = get_items(p.items)
+  return run(p, "Delete items", function()
+    for _, item in ipairs(items) do
+      reaper.DeleteTrackMediaItem(reaper.GetMediaItem_Track(item), item)
+    end
+    return #items
+  end)
+end
+
+local CMD_TAKE_REVERSE = 41051 -- Item properties: Toggle take reverse
+local CMD_GLUE = 41588         -- Item: Glue items
+
+local function reverse_midi(take, item)
+  local _, notes = reaper.MIDI_CountEvts(take)
+  local item_start = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+  local item_end = item_start + reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+  local s = reaper.MIDI_GetPPQPosFromProjTime(take, item_start)
+  local e = reaper.MIDI_GetPPQPosFromProjTime(take, item_end)
+  for i = 0, notes - 1 do
+    local _, sel, muted, a, b, chan, pitch, vel = reaper.MIDI_GetNote(take, i)
+    reaper.MIDI_SetNote(take, i, sel, muted, s + e - b, s + e - a, chan, pitch, vel, true)
+  end
+  reaper.MIDI_Sort(take)
+end
+
+function commands.reverse_items(p)
+  local items = get_items(p.items)
+  return run(p, "Reverse items", function()
+    local audio = {}
+    for _, item in ipairs(items) do
+      local take = reaper.GetActiveTake(item)
+      if take and reaper.TakeIsMIDI(take) then reverse_midi(take, item)
+      elseif take then audio[#audio + 1] = item end
+    end
+    if #audio > 0 then
+      select_only_items(audio)
+      reaper.Main_OnCommand(CMD_TAKE_REVERSE, 0)
+    end
+    return #items
+  end)
+end
+
+function commands.glue_items(p)
+  local items = get_items(p.items)
+  return run(p, "Glue items", function()
+    select_only_items(items)
+    reaper.Main_OnCommand(CMD_GLUE, 0)
+    local out = json.array()
+    for i = 0, reaper.CountSelectedMediaItems(0) - 1 do
+      out[#out + 1] = item_summary(reaper.GetSelectedMediaItem(0, i))
+    end
+    return out
+  end)
+end
+
+function commands.duplicate_item(p)
+  local item = get_item(p.item)
+  return run(p, "Duplicate item", function()
+    local tr = is_null(p.track) and reaper.GetMediaItem_Track(item) or get_track(p.track)
+    local _, chunk = reaper.GetItemStateChunk(item, "", false)
+    chunk = chunk:gsub("\n%s*[IP]?GUID {[^}]*}", "")
+    local count = math.tointeger(p.count or 1)
+    local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+    local len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+    local out = json.array()
+    for i = 1, count do
+      local copy = reaper.AddMediaItemToTrack(tr)
+      reaper.SetItemStateChunk(copy, chunk, false)
+      local at = to_time(p.position)
+      if at then at = at + (i - 1) * len else at = pos + i * len end
+      reaper.SetMediaItemInfo_Value(copy, "D_POSITION", at)
+      out[#out + 1] = item_summary(copy)
+    end
+    return out
+  end)
+end
+
+function commands.insert_media(p)
+  local tr = get_track(p.track)
+  return run(p, "Insert media", function()
+    reaper.SetOnlyTrackSelected(tr)
+    reaper.SelectAllMediaItems(0, false)
+    reaper.SetEditCurPos(to_time(p.position) or 0, false, false)
+    local ok = reaper.InsertMedia(p.file, 0)
+    local item = reaper.GetSelectedMediaItem(0, 0)
+    if ok == 0 or not item then error("could not insert " .. tostring(p.file), 0) end
+    return item_summary(item)
+  end)
+end
+
+---------------------------------------------------------------------------
+-- MIDI
+---------------------------------------------------------------------------
+
+function commands.create_midi_item(p)
+  local tr = get_track(p.track)
+  return run(p, "Create MIDI item", function()
+    local s, e = to_time(p.start), to_time(p["end"])
+    if not s or not e or e <= s then error("start and end are required, with end after start", 0) end
+    local item = reaper.CreateNewMIDIItemInProj(tr, s, e, false)
+    local take = reaper.GetActiveTake(item)
+    if not is_null(p.name) then reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", p.name, true) end
+    return item_summary(item)
+  end)
+end
+
+local function note_out(take, i)
+  local _, sel, muted, a, b, chan, pitch, vel = reaper.MIDI_GetNote(take, i)
+  local ta = reaper.MIDI_GetProjTimeFromPPQPos(take, a)
+  local tb = reaper.MIDI_GetProjTimeFromPPQPos(take, b)
+  return json.object({
+    index = i, pitch = pitch, velocity = vel, channel = chan + 1,
+    start_beats = to_qn(ta), length_beats = to_qn(tb) - to_qn(ta),
+    start = ta, ["end"] = tb, muted = muted, selected = sel,
+  })
+end
+
+function commands.get_midi(p)
+  local take, item = get_take(p.item)
+  if not reaper.TakeIsMIDI(take) then error("item is not MIDI", 0) end
+  local _, notes, ccs = reaper.MIDI_CountEvts(take)
+  local out_notes, out_cc = json.array(), json.array()
+  for i = 0, notes - 1 do out_notes[#out_notes + 1] = note_out(take, i) end
+  if p.cc ~= false then
+    for i = 0, ccs - 1 do
+      local _, _, muted, ppq, chanmsg, chan, msg2, msg3 = reaper.MIDI_GetCC(take, i)
+      local t = reaper.MIDI_GetProjTimeFromPPQPos(take, ppq)
+      local e = json.object({ index = i, channel = chan + 1, time = t, beats = to_qn(t), muted = muted })
+      if chanmsg == 0xB0 then e.type = "cc"; e.cc = msg2; e.value = msg3
+      elseif chanmsg == 0xE0 then e.type = "pitchbend"; e.value = (msg3 << 7 | msg2) - 8192
+      elseif chanmsg == 0xC0 then e.type = "program"; e.value = msg2
+      elseif chanmsg == 0xD0 then e.type = "aftertouch"; e.value = msg2
+      else e.type = string.format("0x%02X", chanmsg); e.msg2 = msg2; e.msg3 = msg3 end
+      out_cc[#out_cc + 1] = e
+    end
+  end
+  local summary = item_summary(item)
+  summary.start_beats = to_qn(summary.position)
+  summary.notes = out_notes
+  summary.cc = out_cc
+  return summary
+end
+
+-- Note time: start_beats/length_beats (quarter notes, from item start when relative=true,
+-- else from project start), or start/end in seconds.
+local function note_ppq(take, item, n, relative)
+  local base = relative and to_qn(reaper.GetMediaItemInfo_Value(item, "D_POSITION")) or 0
+  local a, b
+  if not is_null(n.start_beats) then
+    a = reaper.MIDI_GetPPQPosFromProjQN(take, base + n.start_beats)
+    b = reaper.MIDI_GetPPQPosFromProjQN(take, base + n.start_beats + (n.length_beats or 1))
+  elseif not is_null(n.start) then
+    a = reaper.MIDI_GetPPQPosFromProjTime(take, to_time(n.start))
+    b = reaper.MIDI_GetPPQPosFromProjTime(take, to_time(n["end"]))
+  else
+    error("each note needs start_beats or start", 0)
+  end
+  if b <= a then error("note end must be after start", 0) end
+  return a, b
+end
+
+function commands.add_midi_notes(p)
+  local take, item = get_take(p.item)
+  if not reaper.TakeIsMIDI(take) then error("item is not MIDI", 0) end
+  local relative = p.relative ~= false
+  return run(p, "Add MIDI notes", function()
+    local latest = 0
+    for i = 1, (p.notes.n or #p.notes) do
+      local n = p.notes[i]
+      local a, b = note_ppq(take, item, n, relative)
+      local pitch = math.tointeger(n.pitch)
+      if not pitch or pitch < 0 or pitch > 127 then error("pitch must be 0-127", 0) end
+      reaper.MIDI_InsertNote(take, false, n.muted == true, a, b,
+        math.tointeger(n.channel or 1) - 1, pitch, math.tointeger(n.velocity or 100), true)
+      latest = math.max(latest, reaper.MIDI_GetProjTimeFromPPQPos(take, b))
+    end
+    reaper.MIDI_Sort(take)
+    -- Grow the item so no note is cut off.
+    local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+    if p.extend_item ~= false and latest > pos + reaper.GetMediaItemInfo_Value(item, "D_LENGTH") then
+      reaper.MIDI_SetItemExtents(item, to_qn(pos), to_qn(latest))
+    end
+    local _, count = reaper.MIDI_CountEvts(take)
+    return json.object({ added = p.notes.n or #p.notes, total_notes = count })
+  end)
+end
+
+function commands.delete_midi_notes(p)
+  local take = get_take(p.item)
+  return run(p, "Delete MIDI notes", function()
+    local _, count = reaper.MIDI_CountEvts(take)
+    local doomed = {}
+    if p.all then
+      for i = 0, count - 1 do doomed[#doomed + 1] = i end
+    elseif p.indices then
+      for i = 1, (p.indices.n or #p.indices) do doomed[#doomed + 1] = math.tointeger(p.indices[i]) end
+    else
+      error("pass indices or all=true", 0)
+    end
+    table.sort(doomed, function(a, b) return a > b end)
+    for _, i in ipairs(doomed) do reaper.MIDI_DeleteNote(take, i) end
+    reaper.MIDI_Sort(take)
+    return #doomed
+  end)
+end
+
+function commands.add_midi_cc(p)
+  local take, item = get_take(p.item)
+  local relative = p.relative ~= false
+  local base = relative and to_qn(reaper.GetMediaItemInfo_Value(item, "D_POSITION")) or 0
+  return run(p, "Add MIDI CC", function()
+    for i = 1, (p.events.n or #p.events) do
+      local e = p.events[i]
+      local ppq
+      if not is_null(e.beats) then ppq = reaper.MIDI_GetPPQPosFromProjQN(take, base + e.beats)
+      else ppq = reaper.MIDI_GetPPQPosFromProjTime(take, to_time(e.time)) end
+      local chan = math.tointeger(e.channel or 1) - 1
+      local kind = e.type or "cc"
+      if kind == "cc" then
+        reaper.MIDI_InsertCC(take, false, false, ppq, 0xB0, chan, math.tointeger(e.cc), math.tointeger(e.value))
+      elseif kind == "pitchbend" then
+        local v = math.tointeger(e.value) + 8192
+        reaper.MIDI_InsertCC(take, false, false, ppq, 0xE0, chan, v & 0x7F, (v >> 7) & 0x7F)
+      elseif kind == "program" then
+        reaper.MIDI_InsertCC(take, false, false, ppq, 0xC0, chan, math.tointeger(e.value), 0)
+      else
+        error("event type must be cc, pitchbend or program", 0)
+      end
+    end
+    reaper.MIDI_Sort(take)
+    return p.events.n or #p.events
+  end)
+end
+
+---------------------------------------------------------------------------
+-- FX
+---------------------------------------------------------------------------
+
+local function fx_target(p)
+  local tr = get_track(p.track)
+  local fx = math.tointeger(p.fx)
+  if fx == nil and type(p.fx) == "string" then
+    for i = 0, reaper.TrackFX_GetCount(tr) - 1 do
+      local _, name = reaper.TrackFX_GetFXName(tr, i, "")
+      if name == p.fx or name:lower():find(p.fx:lower(), 1, true) then fx = i; break end
+    end
+    if fx == nil then error("no FX matching '" .. p.fx .. "' on this track", 0) end
+  end
+  if fx and (fx < 0 or fx >= reaper.TrackFX_GetCount(tr)) then error("no FX at index " .. fx, 0) end
+  return tr, fx
+end
+
+local function param_info(tr, fx, i)
+  local _, name = reaper.TrackFX_GetParamName(tr, fx, i, "")
+  local _, shown = reaper.TrackFX_GetFormattedParamValue(tr, fx, i, "")
+  return json.object({
+    index = i, name = name,
+    value = reaper.TrackFX_GetParamNormalized(tr, fx, i),
+    display = shown,
+  })
+end
+
+local function find_param(tr, fx, spec)
+  local n = reaper.TrackFX_GetNumParams(tr, fx)
+  local i = math.tointeger(spec)
+  if i then
+    if i < 0 or i >= n then error("no parameter " .. i, 0) end
+    return i
+  end
+  local want, partial = tostring(spec):lower(), nil
+  for k = 0, n - 1 do
+    local _, name = reaper.TrackFX_GetParamName(tr, fx, k, "")
+    if name:lower() == want then return k end
+    if not partial and name:lower():find(want, 1, true) then partial = k end
+  end
+  if partial then return partial end
+  error("no parameter matching '" .. tostring(spec) .. "'", 0)
+end
+
+function commands.add_fx(p)
+  local tr = get_track(p.track)
+  return run(p, "Add FX", function()
+    local pos = is_null(p.position) and -1 or (-1000 - math.tointeger(p.position))
+    local fx = reaper.TrackFX_AddByName(tr, p.name, false, pos)
+    if fx < 0 then error("FX not found: " .. p.name .. ". Use list_installed_fx to find the exact name.", 0) end
+    if not is_null(p.preset) then reaper.TrackFX_SetPreset(tr, fx, p.preset) end
+    local _, name = reaper.TrackFX_GetFXName(tr, fx, "")
+    return json.object({ index = fx, name = name, params = reaper.TrackFX_GetNumParams(tr, fx) })
+  end)
+end
+
+function commands.remove_fx(p)
+  local tr, fx = fx_target(p)
+  return run(p, "Remove FX", function()
+    reaper.TrackFX_Delete(tr, fx)
+    return true
+  end)
+end
+
+function commands.update_fx(p)
+  local tr, fx = fx_target(p)
+  return run(p, "Edit FX", function()
+    if not is_null(p.enabled) then reaper.TrackFX_SetEnabled(tr, fx, p.enabled) end
+    if not is_null(p.offline) then reaper.TrackFX_SetOffline(tr, fx, p.offline) end
+    if not is_null(p.preset) then
+      if not reaper.TrackFX_SetPreset(tr, fx, p.preset) then error("preset not found: " .. p.preset, 0) end
+    end
+    if not is_null(p.move_to) then reaper.TrackFX_CopyToTrack(tr, fx, tr, math.tointeger(p.move_to), true) end
+    return true
+  end)
+end
+
+function commands.get_fx_params(p)
+  local tr, fx = fx_target(p)
+  local _, name = reaper.TrackFX_GetFXName(tr, fx, "")
+  local _, preset = reaper.TrackFX_GetPreset(tr, fx, "")
+  local params = json.array()
+  local filter = not is_null(p.filter) and p.filter:lower() or nil
+  for i = 0, reaper.TrackFX_GetNumParams(tr, fx) - 1 do
+    local info = param_info(tr, fx, i)
+    if not filter or info.name:lower():find(filter, 1, true) then params[#params + 1] = info end
+  end
+  return json.object({ index = fx, name = name, preset = preset, enabled = reaper.TrackFX_GetEnabled(tr, fx), params = params })
+end
+
+-- Find the normalized value whose display text reads `target` (e.g. -6 for "-6.0 dB").
+-- Assumes the display rises or falls monotonically with the value, as it does for most plug-ins.
+local function solve_display(tr, fx, i, target)
+  local function shown(v)
+    local _, s = reaper.TrackFX_FormatParamValueNormalized(tr, fx, i, v, "")
+    local num = tonumber((s or ""):match("[-+]?%d+%.?%d*"))
+    if s and s:lower():find("inf") then num = s:find("-") and -math.huge or math.huge end
+    return num
+  end
+  local lo, hi = 0.0, 1.0
+  local vlo, vhi = shown(lo), shown(hi)
+  if not vlo or not vhi then error("this parameter's display is not numeric; set value (0-1) instead", 0) end
+  local rising = vhi >= vlo
+  for _ = 1, 40 do
+    local mid = (lo + hi) / 2
+    local v = shown(mid)
+    if v == nil then break end
+    if (v < target) == rising then lo = mid else hi = mid end
+  end
+  -- The display is rounded, so pick whichever end of the bracket reads closest to the target.
+  local dlo, dhi = math.abs((shown(lo) or math.huge) - target), math.abs((shown(hi) or math.huge) - target)
+  return dhi <= dlo and hi or lo
+end
+
+function commands.set_fx_params(p)
+  local tr, fx = fx_target(p)
+  return run(p, "Set FX parameters", function()
+    local out = json.array()
+    for k = 1, (p.params.n or #p.params) do
+      local s = p.params[k]
+      local i = find_param(tr, fx, s.param)
+      if not is_null(s.display_value) then
+        reaper.TrackFX_SetParamNormalized(tr, fx, i, solve_display(tr, fx, i, s.display_value))
+      elseif not is_null(s.value) then
+        reaper.TrackFX_SetParamNormalized(tr, fx, i, s.value)
+      else
+        error("each parameter needs value (0-1) or display_value", 0)
+      end
+      out[#out + 1] = param_info(tr, fx, i)
+    end
+    return out
+  end)
+end
+
+function commands.list_installed_fx(p)
+  local filter = not is_null(p.filter) and p.filter:lower() or nil
+  local out = json.array()
+  local i = 0
+  while true do
+    local ok, name, ident = reaper.EnumInstalledFX(i)
+    if not ok then break end
+    if not filter or name:lower():find(filter, 1, true) then
+      out[#out + 1] = json.object({ name = name, ident = ident })
+      if #out >= (p.limit or 200) then break end
+    end
+    i = i + 1
+  end
+  return out
+end
+
+---------------------------------------------------------------------------
+-- Transport, tempo, markers and regions
+---------------------------------------------------------------------------
+
+local CMD_RECORD = 1013
+
+function commands.transport(p)
+  local a = p.action
+  if not is_null(p.position) then reaper.SetEditCurPos(to_time(p.position), true, true) end
+  if a == "play" then reaper.OnPlayButton()
+  elseif a == "stop" then reaper.OnStopButton()
+  elseif a == "pause" then reaper.OnPauseButton()
+  elseif a == "record" then reaper.Main_OnCommand(CMD_RECORD, 0)
+  elseif a ~= "goto" and a ~= nil then error("action must be play, stop, pause, record or goto", 0) end
+  if not is_null(p["repeat"]) then reaper.GetSetRepeat(p["repeat"] and 1 or 0) end
+  local play = reaper.GetPlayState()
+  return json.object({
+    playing = play & 1 == 1, paused = play & 2 == 2, recording = play & 4 == 4,
+    cursor = reaper.GetCursorPosition(),
+  })
+end
+
+function commands.set_time_selection(p)
+  local s, e = to_time(p.start), to_time(p["end"])
+  if not s or not e then
+    reaper.GetSet_LoopTimeRange(true, false, 0, 0, false)
+    return json.null
+  end
+  reaper.GetSet_LoopTimeRange(true, p.loop ~= false, s, e, false)
+  return { s, e }
+end
+
+function commands.set_tempo(p)
+  return run(p, "Set tempo", function()
+    local count = reaper.CountTempoTimeSigMarkers(0)
+    local bpm = p.bpm
+    local num = math.tointeger(p.numerator)
+    local denom = math.tointeger(p.denominator)
+    if count == 0 then
+      if num or denom then
+        reaper.SetTempoTimeSigMarker(0, -1, 0, -1, -1, bpm or reaper.Master_GetTempo(), num or 4, denom or 4, false)
+      elseif bpm then
+        reaper.SetCurrentBPM(0, bpm, false)
+      end
+    else
+      local _, t, measure, beat, old_bpm, old_num, old_denom, linear = reaper.GetTempoTimeSigMarker(0, 0)
+      reaper.SetTempoTimeSigMarker(0, 0, t, measure, beat, bpm or old_bpm,
+        num or old_num, denom or old_denom, linear)
+    end
+    reaper.UpdateTimeline()
+    local n, d, tempo = reaper.TimeMap_GetTimeSigAtTime(0, 0)
+    return json.object({ bpm = tempo, time_signature = { n, d }, tempo_markers = reaper.CountTempoTimeSigMarkers(0) })
+  end)
+end
+
+local function hex_color(c)
+  if is_null(c) then return 0 end
+  local r, g, b = tostring(c):match("^#?(%x%x)(%x%x)(%x%x)$")
+  if not r then error("color must be '#rrggbb'", 0) end
+  return reaper.ColorToNative(tonumber(r, 16), tonumber(g, 16), tonumber(b, 16)) | 0x1000000
+end
+
+function commands.add_marker(p)
+  return run(p, p.region and "Add region" or "Add marker", function()
+    local s = to_time(p.position or p.start)
+    if not s then error("position (or start for a region) is required", 0) end
+    local e = to_time(p["end"]) or s
+    local is_region = p.region == true or not is_null(p["end"])
+    if is_region and e <= s then error("region end must be after start", 0) end
+    local id = reaper.AddProjectMarker2(0, is_region, s, e, p.name or "", math.tointeger(p.id) or -1, hex_color(p.color))
+    return json.object({ id = id, region = is_region })
+  end)
+end
+
+local function find_marker(id, is_region)
+  local _, nm, nr = reaper.CountProjectMarkers(0)
+  for i = 0, nm + nr - 1 do
+    local _, isrgn, pos, rgnend, name, mid, color = reaper.EnumProjectMarkers3(0, i)
+    if mid == id and isrgn == is_region then return pos, rgnend, name, color end
+  end
+  error((is_region and "region " or "marker ") .. tostring(id) .. " not found", 0)
+end
+
+function commands.update_marker(p)
+  local id, is_region = math.tointeger(p.id), p.region == true
+  local pos, rgnend, name, color = find_marker(id, is_region)
+  return run(p, "Edit marker", function()
+    local s = to_time(p.position or p.start) or pos
+    local e = to_time(p["end"]) or rgnend
+    local c = is_null(p.color) and color or hex_color(p.color)
+    reaper.SetProjectMarker4(0, id, is_region, s, e, is_null(p.name) and name or p.name, c,
+      (not is_null(p.name) and p.name == "") and 1 or 0)
+    return true
+  end)
+end
+
+function commands.delete_marker(p)
+  local id, is_region = math.tointeger(p.id), p.region == true
+  find_marker(id, is_region)
+  return run(p, "Delete marker", function()
+    return reaper.DeleteProjectMarker(0, id, is_region)
+  end)
 end
 
 M.commands = commands

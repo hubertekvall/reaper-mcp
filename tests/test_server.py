@@ -17,7 +17,8 @@ def payload(result):
 async def test_tools_are_listed(running):
     async with Client(create_server(running.bridge)) as client:
         tools = {t.name for t in (await client.list_tools()).tools}
-    assert tools == {"reaper_status", "get_project_state", "call_reaper_api"}
+    assert {"reaper_status", "get_project_state", "call_reaper_api", "add_midi_notes", "set_fx_params"} <= tools
+    assert len(tools) <= 40, "keep the tool list small"
 
 
 async def test_tools_round_trip_through_mcp(running):

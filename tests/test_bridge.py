@@ -24,6 +24,8 @@ def test_lua_json_round_trip(env):
     assert json.loads(J.encode(J.decode(json.dumps(value)))) == value
     assert json.loads(J.encode(J.decode('"\\u00e5\\ud83c\\udf9b"'))) == "å🎛"
     assert J.decode("[1,-2,3.5e2]")[2] == -2
+    # UTF-8 must pass through unescaped whatever the C locale says about bytes >= 0x80.
+    assert J.encode("åü🎛 \x01") == '"åü🎛 \\u0001"'
 
 
 def test_lua_json_rejects_garbage(env):
